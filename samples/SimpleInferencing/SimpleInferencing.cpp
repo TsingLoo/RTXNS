@@ -13,6 +13,7 @@
 #include <donut/engine/ShaderFactory.h>
 #include <donut/app/DeviceManager.h>
 #include <donut/app/UserInterfaceUtils.h>
+#include <donut/app/Camera.h>
 #include <donut/core/log.h>
 #include <donut/core/vfs/VFS.h>
 #include <nvrhi/utils.h>
@@ -40,6 +41,7 @@ struct UIData
     float specular = 0.5f;
     float roughness = 0.4f;
     float metallic = 0.7f;
+    float3 lightDir = { -0.761f, -0.467f, -0.450f };
 };
 
 class SimpleInferencing : public app::IRenderPass
@@ -47,6 +49,7 @@ class SimpleInferencing : public app::IRenderPass
 public:
     SimpleInferencing(app::DeviceManager* deviceManager, UIData* uiParams, const std::string& modelPath) : IRenderPass(deviceManager), m_userInterfaceParameters(uiParams), m_modelPath(modelPath)
     {
+        cartesianToSpherical(float3(0.f, 0.f, 2.f), m_cameraAzimuth, m_cameraElevation, m_cameraDistance);
     }
 
     bool Init()
@@ -242,30 +245,66 @@ public:
         GetDevice()->executeCommandList(commandList);
     }
 
+    bool KeyboardUpdate(int key, int scancode, int action, int mods) override
+    {
+        if (key >= 0 && key < 512) m_keys[key] = (action != 0);
+        return true;
+    }
+
     bool MousePosUpdate(double xpos, double ypos) override
     {
+        float2 delta = float2(float(xpos), float(ypos)) - m_currentXY;
         if (m_pressedFlag)
         {
-            float2 delta = float2(float(xpos), float(ypos)) - m_currentXY;
-            float a, e, d;
-            cartesianToSpherical(m_lightDir, a, e, d);
-            a += delta.x * 0.01f;
-            e += delta.y * 0.01f;
-            m_lightDir = sphericalToCartesian(a, e, d);
+            m_cameraAzimuth -= delta.x * 0.01f;
+            m_cameraElevation += delta.y * 0.01f;
+            m_cameraElevation = std::max(m_cameraElevation, -1.57f + 0.01f);
+            m_cameraElevation = std::min(m_cameraElevation, 1.57f - 0.01f);
         }
-
+        else if (m_panFlag)
+        {
+            float3 offset = sphericalToCartesian(m_cameraAzimuth, m_cameraElevation, m_cameraDistance);
+            float3 camDir = normalize(-offset);
+            float3 camRight = normalize(cross(camDir, float3(0, 1, 0)));
+            float3 camUp = cross(camRight, camDir);
+            
+            m_cameraTarget += camRight * delta.x * 0.005f * m_cameraDistance;
+            m_cameraTarget += camUp * delta.y * 0.005f * m_cameraDistance;
+        }
         m_currentXY = float2(float(xpos), float(ypos));
         return true;
     }
 
     bool MouseButtonUpdate(int button, int action, int mods) override
     {
-        m_pressedFlag = action == 1;
+        if (button == GLFW_MOUSE_BUTTON_LEFT) m_pressedFlag = (action != 0);
+        if (button == GLFW_MOUSE_BUTTON_MIDDLE) m_panFlag = (action != 0);
+        return true;
+    }
+
+    bool MouseScrollUpdate(double xoffset, double yoffset) override
+    {
+        m_cameraDistance -= float(yoffset) * 0.5f;
+        m_cameraDistance = std::max(m_cameraDistance, 0.1f);
         return true;
     }
 
     void Animate(float seconds) override
     {
+        // Calculate camera vectors for WASD movement
+        float3 offset = sphericalToCartesian(m_cameraAzimuth, m_cameraElevation, m_cameraDistance);
+        float3 camDir = normalize(-offset);
+        float3 camRight = normalize(cross(camDir, float3(0, 1, 0)));
+        float3 horizontalForward = normalize(float3(camDir.x, 0.f, camDir.z));
+        
+        float moveSpeed = (m_keys[GLFW_KEY_LEFT_SHIFT] ? 3.0f : 1.0f) * seconds * 2.0f;
+        if (m_keys[GLFW_KEY_W]) m_cameraTarget += camDir * moveSpeed;
+        if (m_keys[GLFW_KEY_S]) m_cameraTarget -= camDir * moveSpeed;
+        if (m_keys[GLFW_KEY_D]) m_cameraTarget -= camRight * moveSpeed;
+        if (m_keys[GLFW_KEY_A]) m_cameraTarget += camRight * moveSpeed;
+        if (m_keys[GLFW_KEY_E]) m_cameraTarget += float3(0, 1, 0) * moveSpeed;
+        if (m_keys[GLFW_KEY_Q]) m_cameraTarget -= float3(0, 1, 0) * moveSpeed;
+
         auto t = int(GetDevice()->getTimerQueryTime(m_neuralTimer) * 1000000);
         if (t != 0)
         {
@@ -298,7 +337,8 @@ public:
             psoDesc.inputLayout = m_inputLayout;
             psoDesc.bindingLayouts = { m_bindingLayout };
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
-            psoDesc.renderState.depthStencilState.depthTestEnable = false;
+            psoDesc.renderState.depthStencilState.depthTestEnable = true;
+            psoDesc.renderState.depthStencilState.depthWriteEnable = true;
 
             m_pipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer->getFramebufferInfo());
         }
@@ -306,10 +346,17 @@ public:
         m_commandList->open();
 
         nvrhi::utils::ClearColorAttachment(m_commandList, framebuffer, 0, nvrhi::Color(0.f));
+        auto fbDesc = framebuffer->getDesc();
+        if (fbDesc.depthAttachment.valid())
+        {
+            nvrhi::utils::ClearDepthStencilAttachment(m_commandList, framebuffer, 1.0f, 0);
+        }
 
-        // Camera at (0,0,2) looking at (0,0,-1) direction, up direction (0,1,0)
-        float3 cameraUp(0, 1, 0);
-        float4 viewDir(0, 0, -1, 0);
+        float3 offset = sphericalToCartesian(m_cameraAzimuth, m_cameraElevation, m_cameraDistance);
+        float3 camPos = m_cameraTarget + offset;
+        float3 camDir = normalize(-offset);
+        float3 camRight = normalize(cross(camDir, float3(0, 1, 0)));
+        float3 camUp = cross(camRight, camDir);
 
         ////////////////////
         //
@@ -318,8 +365,8 @@ public:
         ////////////////////
         NeuralConstants modelConstant{ {},
                                        {},
-                                       { 0, 0, 2, 0 },
-                                       float4(m_lightDir, 1.f),
+                                       { camPos.x, camPos.y, camPos.z, 0 },
+                                       float4(normalize(m_userInterfaceParameters->lightDir), 1.f),
                                        float4(m_userInterfaceParameters->lightIntensity),
                                        float4(.82f, .67f, .16f, 1.f),
                                        m_userInterfaceParameters->specular,
@@ -328,7 +375,7 @@ public:
                                        0.f,
                                        m_weightOffsets,
                                        m_biasOffsets };
-        modelConstant.view = affineToHomogeneous(translation(-modelConstant.cameraPos.xyz()) * lookatZ(-viewDir.xyz(), cameraUp));
+        modelConstant.view = affineToHomogeneous(translation(-camPos) * lookatZ(-camDir, camUp));
         modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
 
         // Upload the constant buffer.
@@ -391,9 +438,14 @@ private:
     std::shared_ptr<engine::ShaderFactory> m_shaderFactory;
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
 
-    float3 m_lightDir{ -0.761f, -0.467f, -0.450f };
-    float2 m_currentXY;
+    float3 m_cameraTarget{ 0.f, 0.f, 0.f };
+    float m_cameraAzimuth = 0.f;
+    float m_cameraElevation = 0.f;
+    float m_cameraDistance = 2.f;
+    float2 m_currentXY{ 0.f, 0.f };
     bool m_pressedFlag = false;
+    bool m_panFlag = false;
+    bool m_keys[512] = { false };
 
     int m_indicesNum = 0;
     std::string m_modelPath;
@@ -431,6 +483,7 @@ public:
         }
         ImGui::Separator();
 
+        ImGui::SliderFloat3("Light Direction", &m_userInterfaceParameters->lightDir.x, -1.0f, 1.0f);
         ImGui::SliderFloat("Light Intensity", &m_userInterfaceParameters->lightIntensity, 0.f, 20.f);
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
@@ -456,6 +509,7 @@ int main(int __argc, const char** __argv)
 
     app::DeviceCreationParameters deviceParams;
     deviceParams.backBufferWidth = deviceParams.backBufferHeight;
+    deviceParams.depthBufferFormat = nvrhi::Format::D24S8;
 
 #ifdef _DEBUG
     deviceParams.enableDebugRuntime = true;
