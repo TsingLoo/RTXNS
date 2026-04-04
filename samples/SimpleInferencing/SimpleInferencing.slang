@@ -19,6 +19,7 @@ DECLARE_CBUFFER(NeuralConstants, gConst, 0, 0);
 ByteAddressBuffer gMLPParams            :REGISTER_SRV(0, 0);
 
 TextureCube<float4> t_Skybox            : REGISTER_SRV(1, 1);
+TextureCube<float4> t_Irradiance        : REGISTER_SRV(1, 2);
 SamplerState s_Skybox                 : REGISTER_SAMPLER(0, 1);
 
 struct VertexIn
@@ -196,7 +197,7 @@ void main_ps(
     float3 R = reflect(-view, norm);
 
     float max_mip = 10.0; // Rough approximation. Donut TextureCache will generate full mip chain.
-    float3 iblDiffuse = t_Skybox.SampleLevel(s_Skybox, norm, max_mip - 2.0).rgb;
+    float3 iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, norm, 0.0).rgb;
     float3 iblSpecular = t_Skybox.SampleLevel(s_Skybox, R, roughness * max_mip).rgb;
 
     // Analytical EnvBRDF takes the role of the 2D LUT texture lookup

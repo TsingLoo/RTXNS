@@ -206,8 +206,9 @@ public:
         nvrhi::BindingLayoutDesc iblDesc;
         iblDesc.visibility = nvrhi::ShaderType::Pixel;
         iblDesc.bindings = {
-            nvrhi::BindingLayoutItem::Texture_SRV(1),  // bound to t1
-            nvrhi::BindingLayoutItem::Sampler(0)       // bound to s0 (can overlap safely if shared sampler)
+            nvrhi::BindingLayoutItem::Texture_SRV(1),  // t_Skybox (Specular)
+            nvrhi::BindingLayoutItem::Texture_SRV(2),  // t_Irradiance (Diffuse)
+            nvrhi::BindingLayoutItem::Sampler(0)       // shared sampler
         };
         m_iblBindingLayout = GetDevice()->createBindingLayout(iblDesc);
 
@@ -301,6 +302,23 @@ public:
         m_lightProbePass->GenerateCubemapMips(commandList, m_skyboxCubemap, 0, 0, cubeDesc.mipLevels - 1);
 
         commandList->setTextureState(m_skyboxCubemap, nvrhi::TextureSubresourceSet(0, cubeDesc.mipLevels, 0, 6), nvrhi::ResourceStates::ShaderResource);
+
+        nvrhi::TextureDesc irrDesc;
+        irrDesc.width = 32;
+        irrDesc.height = 32;
+        irrDesc.arraySize = 6;
+        irrDesc.dimension = nvrhi::TextureDimension::TextureCube;
+        irrDesc.format = nvrhi::Format::RGBA16_FLOAT;
+        irrDesc.isRenderTarget = true;
+        irrDesc.mipLevels = 1;
+        irrDesc.debugName = "IrradianceCubemap";
+        irrDesc.initialState = nvrhi::ResourceStates::RenderTarget;
+        irrDesc.keepInitialState = true;
+        m_irradianceCubemap = GetDevice()->createTexture(irrDesc);
+
+        m_lightProbePass->RenderDiffuseMap(commandList, m_skyboxCubemap, nvrhi::TextureSubresourceSet(0, 1, 0, 6), m_irradianceCubemap, 0, 0);
+
+        commandList->setTextureState(m_irradianceCubemap, nvrhi::TextureSubresourceSet(0, 1, 0, 6), nvrhi::ResourceStates::ShaderResource);
 
         commandList->close();
         GetDevice()->executeCommandList(commandList);
@@ -503,6 +521,7 @@ public:
             nvrhi::BindingSetDesc iblSetDesc;
             iblSetDesc.bindings = {
                 nvrhi::BindingSetItem::Texture_SRV(1, m_skyboxCubemap),
+                nvrhi::BindingSetItem::Texture_SRV(2, m_irradianceCubemap),
                 nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler)
             };
             m_iblBindingSet = GetDevice()->createBindingSet(iblSetDesc, m_iblBindingLayout);
@@ -635,6 +654,7 @@ private:
     std::string m_skyboxPath;
     nvrhi::SamplerHandle m_skyboxSampler;
     nvrhi::TextureHandle m_skyboxCubemap;
+    nvrhi::TextureHandle m_irradianceCubemap;
     nvrhi::ShaderHandle m_equirectToCubeCS;
     nvrhi::BindingLayoutHandle m_equirectToCubeBindingLayout;
     nvrhi::ComputePipelineHandle m_equirectToCubePipeline;
