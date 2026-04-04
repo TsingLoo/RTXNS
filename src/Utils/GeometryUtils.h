@@ -44,6 +44,15 @@ bool LoadHDRI(const std::string& path, TextureData& outTexture);
 
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV);
 
+// Loads an OBJ file
+bool LoadOBJ(
+    const std::string& path, 
+    std::vector<Vertex>& outVertices, 
+    std::vector<uint32_t>& outIndices, 
+    std::vector<MaterialParams>& outMaterials,
+    std::vector<uint32_t>& outMaterialIndices
+);
+
 // Loads a GLTF/GLB file, baking node transforms, and extracting vertices, indices, and materials.
 bool LoadGLTF(
     const std::string& path, 

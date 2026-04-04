@@ -53,6 +53,110 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radiu
     return { vs, indices };
 }
 
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+
+bool LoadOBJ(
+    const std::string& path, 
+    std::vector<Vertex>& outVertices, 
+    std::vector<uint32_t>& outIndices, 
+    std::vector<MaterialParams>& outMaterials,
+    std::vector<uint32_t>& outMaterialIndices
+)
+{
+    std::ifstream file(path);
+    if (!file.is_open()) return false;
+
+    std::vector<dm::float3> temp_vertices;
+    std::vector<dm::float3> temp_normals;
+
+    outVertices.clear();
+    outIndices.clear();
+
+    MaterialParams p;
+    p.baseColor = dm::float4(1.f, 1.f, 1.f, 1.f);
+    p.metallic = 0.0f;
+    p.roughness = 0.5f;
+    p.specular = 0.5f;
+    outMaterials.push_back(p);
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream iss(line);
+        std::string type;
+        iss >> type;
+        
+        if (type == "v")
+        {
+            dm::float3 v;
+            iss >> v.x >> v.y >> v.z;
+            temp_vertices.push_back(v);
+        }
+        else if (type == "vn")
+        {
+            dm::float3 vn;
+            iss >> vn.x >> vn.y >> vn.z;
+            temp_normals.push_back(vn);
+        }
+        else if (type == "f")
+        {
+            std::string vt1, vt2, vt3;
+            if (!(iss >> vt1 >> vt2 >> vt3)) continue;
+
+            auto parseVertex = [&](const std::string& v_str) {
+                std::string token;
+                std::istringstream tokenStream(v_str);
+                
+                int v_idx = 0, vt_idx = 0, vn_idx = 0;
+                
+                std::getline(tokenStream, token, '/');
+                if (!token.empty()) v_idx = std::stoi(token);
+                
+                std::getline(tokenStream, token, '/');
+                if (!token.empty()) vt_idx = std::stoi(token);
+                
+                std::getline(tokenStream, token, '/');
+                if (!token.empty()) vn_idx = std::stoi(token);
+
+                Vertex vert;
+                // Obj is 1-indexed. Assuming positive indices for simplicity.
+                if (v_idx > 0 && v_idx <= temp_vertices.size())
+                    vert.position = temp_vertices[v_idx - 1];
+                else
+                    vert.position = dm::float3(0,0,0);
+                    
+                if (vn_idx > 0 && vn_idx <= temp_normals.size())
+                    vert.normal = normalize(temp_normals[vn_idx - 1]);
+                else
+                    vert.normal = dm::float3(0,1,0);
+
+                outVertices.push_back(vert);
+                outIndices.push_back((uint32_t)outVertices.size() - 1);
+                outMaterialIndices.push_back(0);
+            };
+
+            parseVertex(vt1);
+            parseVertex(vt2);
+            parseVertex(vt3);
+            
+            // Support for quads (simple fan triangulation)
+            std::string vt4;
+            if (iss >> vt4)
+            {
+                outIndices.push_back(outIndices[outIndices.size() - 3]);
+                outIndices.push_back(outIndices[outIndices.size() - 2]);
+                parseVertex(vt4);
+            }
+        }
+    }
+    
+    return true;
+}
+
 #include <cgltf.h>
 
 bool LoadGLTF(

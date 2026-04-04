@@ -81,10 +81,7 @@ bool SimpleInferencing::Init()
     }
     else
     {
-        auto sphere = GenerateSphere(1, 64, 64);
-        std::vector<MaterialParams> mats;
-        std::vector<uint32_t> matIds;
-        UpdateGeometryBuffers(sphere.first, sphere.second);
+        LoadModel(GetLocalPath("assets/3dmodel/sphere.obj").string());
     }
 
     const auto& params = net.GetNetworkParams();
@@ -150,9 +147,19 @@ bool SimpleInferencing::LoadModel(const std::string& path)
     std::vector<MaterialParams> mats;
     std::vector<uint32_t> matIndices;
 
-    if (!LoadGLTF(path, vertices, indices, mats, matIndices))
+    bool loaded = false;
+    if (path.length() >= 4 && path.substr(path.length() - 4) == ".obj")
     {
-        log::error("Failed to load GLTF model: %s", path.c_str());
+        loaded = LoadOBJ(path, vertices, indices, mats, matIndices);
+    }
+    else
+    {
+        loaded = LoadGLTF(path, vertices, indices, mats, matIndices);
+    }
+
+    if (!loaded)
+    {
+        log::error("Failed to load model: %s", path.c_str());
         return false;
     }
 

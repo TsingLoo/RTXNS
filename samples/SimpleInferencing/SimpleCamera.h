@@ -19,13 +19,17 @@ public:
     donut::math::float3 GetRight() const;
 
 private:
-    donut::math::float3 m_cameraTarget{ 0.f, 0.f, 0.f };
-    float m_cameraAzimuth = 0.f;
-    float m_cameraElevation = 0.f;
-    float m_cameraDistance = 2.f;
+    void UpdateVectors();
+
+    donut::math::float3 m_position{ 0.f, 0.f, 2.f };
+    float m_yaw = 0.f;
+    float m_pitch = 0.f;
+
+    donut::math::float3 m_forward{ 0.f, 0.f, -1.f };
+    donut::math::float3 m_right{ 1.f, 0.f, 0.f };
+    donut::math::float3 m_up{ 0.f, 1.f, 0.f };
 
     donut::math::float2 m_currentXY{ 0.f, 0.f };
     bool m_pressedFlag = false;
-    bool m_panFlag = false;
     bool m_keys[512] = { false };
 };
