@@ -10,14 +10,31 @@
 
 #include "GeometryUtils.h"
 
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <filesystem>
+#include <cstring>
+
+#include <stb_image.h>
+
+extern "C" {
+#include <mikktspace.h>
+}
+
+#include <cgltf.h>
+
 using namespace dm;
+
+// =============================================================================
+// Sphere generation
+// =============================================================================
 
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV)
 {
     std::vector<Vertex> vs;
     std::vector<uint32_t> indices;
 
-    // Create vertices.
     for (uint32_t v = 0; v <= segmentsV; ++v)
     {
         for (uint32_t u = 0; u <= segmentsU; ++u)
@@ -26,11 +43,17 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radiu
             float theta = uv.x * 2.f * PI_f;
             float phi = uv.y * PI_f;
             float3 dir = float3(std::cos(theta) * std::sin(phi), std::cos(phi), std::sin(theta) * std::sin(phi));
-            vs.push_back({ dir * radius, dir, 0 });
+
+            Vertex vert = {};
+            vert.position = dir * radius;
+            vert.normal = dir;
+            vert.uv = uv;
+            vert.tangent = float4(0, 0, 0, 1);
+            vert.materialIndex = 0;
+            vs.push_back(vert);
         }
     }
 
-    // Create indices.
     for (uint32_t v = 0; v < segmentsV; ++v)
     {
         for (uint32_t u = 0; u < segmentsU; ++u)
@@ -53,9 +76,9 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radiu
     return { vs, indices };
 }
 
-#include <fstream>
-#include <sstream>
-#include <algorithm>
+// =============================================================================
+// OBJ loader
+// =============================================================================
 
 bool LoadOBJ(
     const std::string& path, 
@@ -74,11 +97,21 @@ bool LoadOBJ(
     outVertices.clear();
     outIndices.clear();
 
-    MaterialParams p;
+    MaterialParams p = {};
     p.baseColor = dm::float4(1.f, 1.f, 1.f, 1.f);
     p.metallic = 0.0f;
     p.roughness = 0.5f;
     p.specular = 0.5f;
+    p.normalScale = 1.0f;
+    p.occlusionStrength = 1.0f;
+    p.emissiveFactor = dm::float3(0, 0, 0);
+    p.baseColorTexIdx = -1;
+    p.normalTexIdx = -1;
+    p.metallicRoughnessTexIdx = -1;
+    p.occlusionTexIdx = -1;
+    p.emissiveTexIdx = -1;
+    p.alphaMode = 0;
+    p.alphaCutoff = 0.5f;
     outMaterials.push_back(p);
 
     std::string line;
@@ -122,17 +155,19 @@ bool LoadOBJ(
                 std::getline(tokenStream, token, '/');
                 if (!token.empty()) vn_idx = std::stoi(token);
 
-                Vertex vert;
-                // Obj is 1-indexed. Assuming positive indices for simplicity.
-                if (v_idx > 0 && v_idx <= temp_vertices.size())
+                Vertex vert = {};
+                if (v_idx > 0 && v_idx <= (int)temp_vertices.size())
                     vert.position = temp_vertices[v_idx - 1];
                 else
                     vert.position = dm::float3(0,0,0);
                     
-                if (vn_idx > 0 && vn_idx <= temp_normals.size())
+                if (vn_idx > 0 && vn_idx <= (int)temp_normals.size())
                     vert.normal = normalize(temp_normals[vn_idx - 1]);
                 else
                     vert.normal = dm::float3(0,1,0);
+
+                vert.uv = dm::float2(0, 0);
+                vert.tangent = dm::float4(1, 0, 0, 1);
 
                 outVertices.push_back(vert);
                 outIndices.push_back((uint32_t)outVertices.size() - 1);
@@ -143,7 +178,6 @@ bool LoadOBJ(
             parseVertex(vt2);
             parseVertex(vt3);
             
-            // Support for quads (simple fan triangulation)
             std::string vt4;
             if (iss >> vt4)
             {
@@ -157,13 +191,159 @@ bool LoadOBJ(
     return true;
 }
 
-#include <cgltf.h>
+// =============================================================================
+// MikkTSpace tangent generation for GLTF meshes
+// =============================================================================
+
+struct MikkTSpaceUserData
+{
+    std::vector<Vertex>* vertices;
+    std::vector<uint32_t>* indices;
+};
+
+static int mikkGetNumFaces(const SMikkTSpaceContext* pContext)
+{
+    auto* data = (MikkTSpaceUserData*)pContext->m_pUserData;
+    return (int)(data->indices->size() / 3);
+}
+
+static int mikkGetNumVerticesOfFace(const SMikkTSpaceContext* /*pContext*/, const int /*iFace*/)
+{
+    return 3;
+}
+
+static void mikkGetPosition(const SMikkTSpaceContext* pContext, float fvPosOut[], const int iFace, const int iVert)
+{
+    auto* data = (MikkTSpaceUserData*)pContext->m_pUserData;
+    uint32_t idx = (*data->indices)[iFace * 3 + iVert];
+    const Vertex& v = (*data->vertices)[idx];
+    fvPosOut[0] = v.position.x;
+    fvPosOut[1] = v.position.y;
+    fvPosOut[2] = v.position.z;
+}
+
+static void mikkGetNormal(const SMikkTSpaceContext* pContext, float fvNormOut[], const int iFace, const int iVert)
+{
+    auto* data = (MikkTSpaceUserData*)pContext->m_pUserData;
+    uint32_t idx = (*data->indices)[iFace * 3 + iVert];
+    const Vertex& v = (*data->vertices)[idx];
+    fvNormOut[0] = v.normal.x;
+    fvNormOut[1] = v.normal.y;
+    fvNormOut[2] = v.normal.z;
+}
+
+static void mikkGetTexCoord(const SMikkTSpaceContext* pContext, float fvTexcOut[], const int iFace, const int iVert)
+{
+    auto* data = (MikkTSpaceUserData*)pContext->m_pUserData;
+    uint32_t idx = (*data->indices)[iFace * 3 + iVert];
+    const Vertex& v = (*data->vertices)[idx];
+    fvTexcOut[0] = v.uv.x;
+    fvTexcOut[1] = v.uv.y;
+}
+
+static void mikkSetTSpaceBasic(const SMikkTSpaceContext* pContext, const float fvTangent[], const float fSign, const int iFace, const int iVert)
+{
+    auto* data = (MikkTSpaceUserData*)pContext->m_pUserData;
+    uint32_t idx = (*data->indices)[iFace * 3 + iVert];
+    Vertex& v = (*data->vertices)[idx];
+    v.tangent = dm::float4(fvTangent[0], fvTangent[1], fvTangent[2], fSign);
+}
+
+static void GenerateMikkTSpaceTangents(std::vector<Vertex>& vertices, std::vector<uint32_t>& indices)
+{
+    MikkTSpaceUserData userData;
+    userData.vertices = &vertices;
+    userData.indices = &indices;
+
+    SMikkTSpaceInterface iface = {};
+    iface.m_getNumFaces = mikkGetNumFaces;
+    iface.m_getNumVerticesOfFace = mikkGetNumVerticesOfFace;
+    iface.m_getPosition = mikkGetPosition;
+    iface.m_getNormal = mikkGetNormal;
+    iface.m_getTexCoord = mikkGetTexCoord;
+    iface.m_setTSpaceBasic = mikkSetTSpaceBasic;
+    iface.m_setTSpace = nullptr;
+
+    SMikkTSpaceContext context = {};
+    context.m_pInterface = &iface;
+    context.m_pUserData = &userData;
+
+    genTangSpaceDefault(&context);
+}
+
+// =============================================================================
+// GLTF texture loading helpers
+// =============================================================================
+
+static bool LoadGltfImage(
+    const cgltf_image* image,
+    const std::string& gltfDir,
+    const cgltf_data* data,
+    GltfTextureData& outTex)
+{
+    int w, h, ch;
+    unsigned char* pixels = nullptr;
+
+    if (image->buffer_view)
+    {
+        // Embedded texture — data is in the buffer_view
+        const uint8_t* bufData = cgltf_buffer_view_data(image->buffer_view);
+        if (!bufData) return false;
+        pixels = stbi_load_from_memory(bufData, (int)image->buffer_view->size, &w, &h, &ch, 4);
+    }
+    else if (image->uri)
+    {
+        // External file reference
+        std::string uri = image->uri;
+        // Handle data URI
+        if (uri.rfind("data:", 0) == 0)
+        {
+            // base64 encoded data URI
+            auto commaPos = uri.find(',');
+            if (commaPos == std::string::npos) return false;
+            // We can't easily decode base64 here without a helper, so skip
+            return false;
+        }
+
+        std::string texPath = gltfDir + "/" + uri;
+        pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+    }
+
+    if (!pixels) return false;
+
+    outTex.width = w;
+    outTex.height = h;
+    outTex.channels = 4;
+    outTex.pixels.resize(w * h * 4);
+    memcpy(outTex.pixels.data(), pixels, w * h * 4);
+    outTex.name = image->name ? image->name : "";
+
+    stbi_image_free(pixels);
+    return true;
+}
+
+static int ResolveTextureIndex(
+    const cgltf_texture_view& texView,
+    const cgltf_data* data,
+    const std::vector<int>& imageToTextureIdx)
+{
+    if (!texView.texture) return -1;
+    if (!texView.texture->image) return -1;
+    size_t imgIdx = cgltf_image_index(data, texView.texture->image);
+    if (imgIdx >= imageToTextureIdx.size()) return -1;
+    return imageToTextureIdx[imgIdx];
+}
+
+// =============================================================================
+// GLTF loader
+// =============================================================================
 
 bool LoadGLTF(
     const std::string& path, 
     std::vector<Vertex>& outVertices, 
     std::vector<uint32_t>& outIndices, 
-    std::vector<MaterialParams>& outMaterials
+    std::vector<MaterialParams>& outMaterials,
+    std::vector<GltfTextureData>& outTextures
 )
 {
     cgltf_options options = {};
@@ -178,16 +358,46 @@ bool LoadGLTF(
         return false;
     }
     
+    // Get directory of GLTF file for resolving relative texture paths
+    std::string gltfDir = std::filesystem::path(path).parent_path().string();
+
+    // ---- Load all images ----
+    outTextures.clear();
+    std::vector<int> imageToTextureIdx(data->images_count, -1);
+
+    for (size_t i = 0; i < data->images_count; ++i)
+    {
+        GltfTextureData tex;
+        if (LoadGltfImage(&data->images[i], gltfDir, data, tex))
+        {
+            imageToTextureIdx[i] = (int)outTextures.size();
+            outTextures.push_back(std::move(tex));
+        }
+    }
+
+    // ---- Load materials ----
     outMaterials.clear();
     for (size_t i = 0; i < data->materials_count; ++i)
     {
         cgltf_material* mat = &data->materials[i];
-        MaterialParams p;
+        MaterialParams p = {};
         p.baseColor = float4(1.f, 1.f, 1.f, 1.f);
         p.metallic = 0.0f;
         p.roughness = 0.5f;
         p.specular = 0.5f;
-        
+        p.normalScale = 1.0f;
+        p.occlusionStrength = 1.0f;
+        p.emissiveFactor = float3(mat->emissive_factor[0], mat->emissive_factor[1], mat->emissive_factor[2]);
+
+        // Alpha mode
+        if (mat->alpha_mode == cgltf_alpha_mode_mask)
+            p.alphaMode = 1;
+        else if (mat->alpha_mode == cgltf_alpha_mode_blend)
+            p.alphaMode = 2;
+        else
+            p.alphaMode = 0;
+        p.alphaCutoff = mat->alpha_cutoff;
+
         if (mat->has_pbr_metallic_roughness)
         {
             p.baseColor = float4(
@@ -198,20 +408,52 @@ bool LoadGLTF(
             );
             p.metallic = mat->pbr_metallic_roughness.metallic_factor;
             p.roughness = mat->pbr_metallic_roughness.roughness_factor;
+
+            p.baseColorTexIdx = ResolveTextureIndex(mat->pbr_metallic_roughness.base_color_texture, data, imageToTextureIdx);
+            p.metallicRoughnessTexIdx = ResolveTextureIndex(mat->pbr_metallic_roughness.metallic_roughness_texture, data, imageToTextureIdx);
         }
+        else
+        {
+            p.baseColorTexIdx = -1;
+            p.metallicRoughnessTexIdx = -1;
+        }
+
+        p.normalTexIdx = ResolveTextureIndex(mat->normal_texture, data, imageToTextureIdx);
+        if (mat->normal_texture.texture)
+            p.normalScale = mat->normal_texture.scale;
+
+        p.occlusionTexIdx = ResolveTextureIndex(mat->occlusion_texture, data, imageToTextureIdx);
+        if (mat->occlusion_texture.texture)
+            p.occlusionStrength = mat->occlusion_texture.scale;
+
+        p.emissiveTexIdx = ResolveTextureIndex(mat->emissive_texture, data, imageToTextureIdx);
+
         outMaterials.push_back(p);
     }
     
     if (outMaterials.empty())
     {
-        MaterialParams p;
+        MaterialParams p = {};
         p.baseColor = float4(1.f, 1.f, 1.f, 1.f);
         p.metallic = 0.0f;
         p.roughness = 0.5f;
         p.specular = 0.5f;
+        p.normalScale = 1.0f;
+        p.occlusionStrength = 1.0f;
+        p.emissiveFactor = float3(0, 0, 0);
+        p.baseColorTexIdx = -1;
+        p.normalTexIdx = -1;
+        p.metallicRoughnessTexIdx = -1;
+        p.occlusionTexIdx = -1;
+        p.emissiveTexIdx = -1;
+        p.alphaMode = 0;
+        p.alphaCutoff = 0.5f;
         outMaterials.push_back(p);
     }
     
+    // ---- Load geometry ----
+    bool hasTangentsInFile = false;
+
     for (size_t n = 0; n < data->nodes_count; ++n)
     {
         cgltf_node* node = &data->nodes[n];
@@ -241,17 +483,24 @@ bool LoadGLTF(
             
             cgltf_accessor* pos_acc = nullptr;
             cgltf_accessor* norm_acc = nullptr;
+            cgltf_accessor* uv_acc = nullptr;
+            cgltf_accessor* tan_acc = nullptr;
+
             for (size_t a = 0; a < prim->attributes_count; ++a) {
                 if (prim->attributes[a].type == cgltf_attribute_type_position) pos_acc = prim->attributes[a].data;
-                if (prim->attributes[a].type == cgltf_attribute_type_normal) norm_acc = prim->attributes[a].data;
+                if (prim->attributes[a].type == cgltf_attribute_type_normal)   norm_acc = prim->attributes[a].data;
+                if (prim->attributes[a].type == cgltf_attribute_type_texcoord && prim->attributes[a].index == 0) uv_acc = prim->attributes[a].data;
+                if (prim->attributes[a].type == cgltf_attribute_type_tangent)  tan_acc = prim->attributes[a].data;
             }
             
             if (!pos_acc) continue;
+
+            if (tan_acc) hasTangentsInFile = true;
             
             size_t vCount = pos_acc->count;
             for (size_t v = 0; v < vCount; ++v)
             {
-                Vertex vert;
+                Vertex vert = {};
                 cgltf_float pos[3] = {0,0,0};
                 cgltf_accessor_read_float(pos_acc, v, pos, 3);
                 
@@ -265,6 +514,23 @@ bool LoadGLTF(
                     vert.normal = world_norm;
                 } else {
                     vert.normal = float3(0,1,0); 
+                }
+
+                if (uv_acc) {
+                    cgltf_float uv[2] = {0,0};
+                    cgltf_accessor_read_float(uv_acc, v, uv, 2);
+                    vert.uv = float2(uv[0], uv[1]);
+                } else {
+                    vert.uv = float2(0, 0);
+                }
+
+                if (tan_acc) {
+                    cgltf_float tan[4] = {0,0,0,1};
+                    cgltf_accessor_read_float(tan_acc, v, tan, 4);
+                    float3 world_tan = normalize(normal_matrix * float3(tan[0], tan[1], tan[2]));
+                    vert.tangent = float4(world_tan.x, world_tan.y, world_tan.z, tan[3]);
+                } else {
+                    vert.tangent = float4(1, 0, 0, 1); // Will be overwritten by MikkTSpace
                 }
                 
                 vert.materialIndex = mat_idx;
@@ -282,6 +548,12 @@ bool LoadGLTF(
                 }
             }
         }
+    }
+
+    // Generate tangents via MikkTSpace if none were present in the file
+    if (!hasTangentsInFile && !outVertices.empty() && !outIndices.empty())
+    {
+        GenerateMikkTSpaceTangents(outVertices, outIndices);
     }
     
     cgltf_free(data);

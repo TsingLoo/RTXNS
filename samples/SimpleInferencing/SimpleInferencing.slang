@@ -15,20 +15,43 @@ import LinearOps;
 #include "NetworkConfig.h"
 #include <donut/shaders/binding_helpers.hlsli>
 
+// =============================================================================
+// Binding Set 0: Neural network data
+// =============================================================================
 DECLARE_CBUFFER(NeuralConstants, gConst, 0, 0);
 ByteAddressBuffer gMLPParams            :REGISTER_SRV(0, 0);
 
+// =============================================================================
+// Binding Set 1: IBL cubemaps 
+// =============================================================================
 TextureCube<float4> t_Skybox            : REGISTER_SRV(1, 1);
 TextureCube<float4> t_Irradiance        : REGISTER_SRV(2, 1);
 TextureCube<float4> t_Specular          : REGISTER_SRV(3, 1);
 Texture2D<float4>   t_BRDFLut           : REGISTER_SRV(4, 1);
 
-SamplerState s_Skybox                 : REGISTER_SAMPLER(0, 1);
+SamplerState s_Skybox                   : REGISTER_SAMPLER(0, 1);
 
+// =============================================================================
+// Binding Set 2: Material textures (per-slot bindless)
+// =============================================================================
+StructuredBuffer<GpuMaterialParams> g_Materials : REGISTER_SRV(0, 2);
+
+// Material textures are bound at t1..tN in space 2, each occupying one SRV slot.
+// Slang supports indexing into an unbounded array of textures.
+Texture2D<float4> g_Textures[] : REGISTER_SRV(1, 2);
+
+SamplerState s_Material                 : REGISTER_SAMPLER(0, 2);
+
+// =============================================================================
+// Vertex structures
+// =============================================================================
 struct VertexIn
 {
     float3 pos : POSITION; 
     float3 norm : NORMAL; 
+    float2 uv : TEXCOORD;
+    float4 tangent : TANGENT;
+    uint materialIndex : MATERIAL_IDX;
 };
 
 struct VertexOut
@@ -36,8 +59,14 @@ struct VertexOut
     float4 pos : SV_Position;
     float3 norm : NORMAL;
     float3 view : VIEW;
+    float2 uv : TEXCOORD0;
+    float4 tangent : TANGENT;
+    nointerpolation uint materialIndex : MATERIAL_IDX;
 }
 
+// =============================================================================
+// Vertex Shader
+// =============================================================================
 [shader("vertex")]
 void main_vs(
     VertexIn vIn,
@@ -46,8 +75,14 @@ void main_vs(
     vOut.pos = mul(float4(vIn.pos, 1), gConst.viewProject);
     vOut.norm = vIn.norm;
     vOut.view = gConst.cameraPos.xyz - vIn.pos;
+    vOut.uv = vIn.uv;
+    vOut.tangent = vIn.tangent;
+    vOut.materialIndex = vIn.materialIndex;
 }
 
+// =============================================================================
+// Disney BRDF
+// =============================================================================
 const static float DISNEY_PI = 3.14159265358979323846;
 
 float SchlickFresnel(float u)
@@ -122,55 +157,135 @@ float4 DisneyMLP(float NdotL, float NdotV, float NdotH, float LdotH, float rough
    inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
    
    // Forward propagation through the neural network
-   // Input to hidden layer, then apply activation function
    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, HIDDEN_NEURONS, INPUT_NEURONS>(
        inputParams, gMLPParams, weightOffsets[0], biasOffsets[0], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
    hiddenParams = rtxns::relu(hiddenParams);
    
-   // Hidden layer to hidden layer, then apply activation function 
    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, HIDDEN_NEURONS, HIDDEN_NEURONS>(
        hiddenParams, gMLPParams, weightOffsets[1], biasOffsets[1], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
    hiddenParams = rtxns::relu(hiddenParams);
    
-   // Hidden layer to hidden layer, then apply activation function    
    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, HIDDEN_NEURONS, HIDDEN_NEURONS>(
        hiddenParams, gMLPParams, weightOffsets[2], biasOffsets[2], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
    hiddenParams = rtxns::relu(hiddenParams);
    
-   // Hidden layer to output layer, then apply final activation function
    outputParams = rtxns::LinearOp<VECTOR_FORMAT, OUTPUT_NEURONS, HIDDEN_NEURONS>(
        hiddenParams, gMLPParams, weightOffsets[3], biasOffsets[3], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
    outputParams = exp(outputParams);
 
-    // Take the output from the neural network as the output color
     return float4(outputParams[0], outputParams[1], outputParams[2], outputParams[3]);
 }
 
+// =============================================================================
+// Helper: sample a material texture by index, return white if index < 0
+// =============================================================================
+float4 SampleMaterialTexture(int texIdx, float2 uv)
+{
+    if (texIdx < 0 || texIdx >= (int)gConst.textureCount)
+        return float4(1, 1, 1, 1);
+    return g_Textures[texIdx].Sample(s_Material, uv);
+}
 
-
+// =============================================================================
+// Fragment Shader
+// =============================================================================
 [shader("fragment")]
 void main_ps( 
     VertexOut vOut,
     out float4 o_color : SV_Target0)
 {
-    float4 lightIntensity = gConst.lightIntensity;
-    float4 lightDir =  gConst.lightDir;
-    float4 baseColor = gConst.baseColor;
-    float specular = gConst.specular;
-    float roughness = gConst.roughness;
-    float metallic = gConst.metallic;
+    // ---- Resolve material parameters ----
+    float4 baseColor;
+    float roughness;
+    float metallic;
+    float specular;
+    float3 emissive = float3(0, 0, 0);
+    float ao = 1.0;
 
-    // Prepare input parameters
+    if (gConst.usePerVertexMaterial != 0 && gConst.materialCount > 0)
+    {
+        uint matIdx = min(vOut.materialIndex, gConst.materialCount - 1);
+        GpuMaterialParams mat = g_Materials[matIdx];
+        
+        // Base color: factor * texture
+        baseColor = mat.baseColor;
+        float4 baseColorTex = SampleMaterialTexture(mat.baseColorTexIdx, vOut.uv);
+        baseColor *= baseColorTex;
+        
+        // Alpha test
+        if (mat.alphaMode == 1 && baseColor.a < mat.alphaCutoff)
+            discard;
+        
+        // Metallic-roughness texture (glTF spec: B = metallic, G = roughness)
+        roughness = mat.roughness;
+        metallic = mat.metallic;
+        if (mat.metallicRoughnessTexIdx >= 0)
+        {
+            float4 mrTex = SampleMaterialTexture(mat.metallicRoughnessTexIdx, vOut.uv);
+            roughness *= mrTex.g;
+            metallic *= mrTex.b;
+        }
+        
+        specular = mat.specular;
+        
+        // Occlusion (R channel)
+        if (mat.occlusionTexIdx >= 0)
+        {
+            float aoTex = SampleMaterialTexture(mat.occlusionTexIdx, vOut.uv).r;
+            ao = lerp(1.0, aoTex, mat.occlusionStrength);
+        }
+        
+        // Emissive
+        emissive = mat.emissiveFactor;
+        if (mat.emissiveTexIdx >= 0)
+        {
+            float3 emTex = SampleMaterialTexture(mat.emissiveTexIdx, vOut.uv).rgb;
+            emissive *= emTex;
+        }
+    }
+    else
+    {
+        // Fallback to global UI parameters
+        baseColor = gConst.baseColor;
+        roughness = gConst.roughness;
+        metallic = gConst.metallic;
+        specular = gConst.specular;
+    }
+
+    // ---- Normal mapping ----
+    float3 N = normalize(vOut.norm);
     float3 view = normalize(vOut.view);
-    float3 norm = normalize(vOut.norm);
+
+    if (gConst.usePerVertexMaterial != 0 && gConst.materialCount > 0)
+    {
+        uint matIdx = min(vOut.materialIndex, gConst.materialCount - 1);
+        GpuMaterialParams mat = g_Materials[matIdx];
+        
+        if (mat.normalTexIdx >= 0)
+        {
+            float3 T = normalize(vOut.tangent.xyz);
+            float3 B = cross(N, T) * vOut.tangent.w;
+            float3x3 TBN = float3x3(T, B, N);
+            
+            float3 normalMap = SampleMaterialTexture(mat.normalTexIdx, vOut.uv).rgb;
+            normalMap = normalMap * 2.0 - 1.0;
+            normalMap.xy *= mat.normalScale;
+            N = normalize(mul(normalMap, TBN));
+        }
+    }
+
+    // ---- Lighting setup ----
+    float4 lightIntensity = gConst.lightIntensity;
+    float4 lightDir = gConst.lightDir;
+
     float3 h = normalize(-lightDir.xyz + view);
 
-    float NdotL = max(0.f, dot(norm, -lightDir.xyz));
-    float NdotV = max(0.f, dot(norm, view));
-    float NdotH = max(0.f, dot(norm, h));
+    float NdotL = max(0.f, dot(N, -lightDir.xyz));
+    float NdotV = max(0.f, dot(N, view));
+    float NdotH = max(0.f, dot(N, h));
     float LdotH = max(0.f, dot(h, -lightDir.xyz));
 
-    // Calculate core shader part using MLP or standard analytical model
+    // ---- Disney BRDF ----
     float4 outParams;
     if (gConst.enableNeuralShading != 0)
     {
@@ -181,19 +296,18 @@ void main_ps(
         outParams = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
     }
 
-    // Calculate final color
+    // ---- Final color ----
     float3 Cdlin = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
     float3 Cspec0 = lerp(specular * .08f * float3(1,1,1), Cdlin, metallic);
     float3 brdfn = outParams.x * Cdlin * (1 - metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
     float3 colorh = brdfn * float3(NdotL) * lightIntensity.rgb;
 
-    // --- Image-Based Lighting Evaluation ---
-    float3 R = reflect(-view, norm);
+    // ---- Image-Based Lighting ----
+    float3 R = reflect(-view, N);
 
-    const float MAX_REFLECTION_LOD = 10.0; // The true generated specular mips
-    float3 iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, norm, 0.0).rgb;
+    const float MAX_REFLECTION_LOD = 10.0;
+    float3 iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
     
-    // For near-perfect mirrors, sample the raw skybox to avoid Donut's 256x256 internal intermediate limit
     float lod = roughness * MAX_REFLECTION_LOD;
     float3 iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
     if (roughness < 0.04) {
@@ -201,16 +315,17 @@ void main_ps(
         iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
     }
 
-    // Clamp UVs to prevent the repeatable SamplerState from interpolating across 0.0 and 1.0 edges at exactly NdotV=1.0 (the center of the sphere)
     float2 envBRDF = t_BRDFLut.SampleLevel(s_Skybox, clamp(float2(NdotV, roughness), 0.01, 0.99), 0).rg;
     float3 envSpecular = iblSpecular * (Cspec0 * envBRDF.x + envBRDF.y);
 
-    // Diffuse component (kD is evaluated from max fresnel analytically or simply estimated)
     float3 fresnelRoughness = Cspec0 + (max(float3(1.0 - roughness), Cspec0) - Cspec0) * pow(1.0 - NdotV, 5.0);
     float3 kD = (1.0 - fresnelRoughness) * (1.0 - metallic);
     
     float3 PBR_IBL = kD * Cdlin * iblDiffuse + envSpecular;
 
-    // Blend IBL with directional light
-    o_color = float4(colorh + PBR_IBL, 1.f);
+    // Apply AO to ambient/IBL
+    PBR_IBL *= ao;
+
+    // Combine: directional light + IBL + emissive
+    o_color = float4(colorh + PBR_IBL + emissive, baseColor.a);
  }

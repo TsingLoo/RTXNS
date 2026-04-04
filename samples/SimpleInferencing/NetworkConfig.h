@@ -20,6 +20,9 @@
 #define OUTPUT_NEURONS 4
 #define HIDDEN_NEURONS 32
 
+// Maximum number of material textures supported in the bindless texture array
+#define MAX_MATERIAL_TEXTURES 64
+
 struct NeuralConstants
 {
     // Scene setup
@@ -32,7 +35,7 @@ struct NeuralConstants
     float4 lightDir;
     float4 lightIntensity;
 
-    // Material props
+    // Material props (used as global fallback when no per-vertex material)
     float4 baseColor;
     float specular;
     float roughness;
@@ -45,7 +48,32 @@ struct NeuralConstants
 
     // Material system
     uint usePerVertexMaterial;
-    uint _matPad0, _matPad1, _matPad2; // padding to 16-byte boundary
+    uint materialCount;
+    uint textureCount;
+    uint _matPad0; // padding to 16-byte boundary
+};
+
+// GPU material parameters — must match C++ MaterialParams exactly
+struct GpuMaterialParams
+{
+    float4 baseColor;
+    float roughness;
+    float metallic;
+    float specular;
+    float normalScale;
+
+    float3 emissiveFactor;
+    float occlusionStrength;
+
+    int baseColorTexIdx;
+    int normalTexIdx;
+    int metallicRoughnessTexIdx;
+    int occlusionTexIdx;
+
+    int emissiveTexIdx;
+    int alphaMode;
+    float alphaCutoff;
+    float _pad0;
 };
 
 #endif //__NETWORK_CONFIG_H__

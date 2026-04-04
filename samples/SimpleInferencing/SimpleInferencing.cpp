@@ -124,7 +124,7 @@ bool SimpleInferencing::Init()
         nvrhi::BindingSetItem::RawBuffer_SRV(0, m_mlpDeviceBuffer)
     };
 
-    if (!nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_bindingLayout, m_bindingSet))
+    if (!nvrhi::utils::CreateBindingSetAndLayout(GetDevice(), nvrhi::ShaderType::All, 0, bindingSetDesc, m_bindingLayout, m_bindingSet, true))
     {
         log::error("Couldn't create the binding set or layout");
         return false;
@@ -146,14 +146,19 @@ bool SimpleInferencing::LoadModel(const std::string& path)
     std::vector<uint32_t> indices;
     std::vector<MaterialParams> mats;
     std::vector<uint32_t> matIndices;
+    std::vector<GltfTextureData> textures;
 
     bool loaded = false;
     if (path.length() >= 4 && path.substr(path.length() - 4) == ".obj")
     {
         loaded = LoadOBJ(path, vertices, indices, mats, matIndices);
+        m_hasPerVertexMaterials = false;
     }
     else
-        loaded = LoadGLTF(path, vertices, indices, mats);
+    {
+        loaded = LoadGLTF(path, vertices, indices, mats, textures);
+        m_hasPerVertexMaterials = !textures.empty() || mats.size() > 1;
+    }
 
     if (!loaded)
     {
@@ -163,6 +168,7 @@ bool SimpleInferencing::LoadModel(const std::string& path)
 
     m_modelPath = path;
     UpdateGeometryBuffers(vertices, indices);
+    CreateMaterialResources(mats, textures);
     return true;
 }
 
@@ -174,17 +180,154 @@ void SimpleInferencing::LoadSkyboxTexture(const std::string& path)
     }
 }
 
+void SimpleInferencing::CreateMaterialResources(const std::vector<MaterialParams>& materials, const std::vector<GltfTextureData>& textures)
+{
+    m_materials = materials;
+    m_materialCount = (uint32_t)materials.size();
+    m_textureCount = (uint32_t)textures.size();
+
+    // Reset previous resources
+    m_materialBindingSet = nullptr;
+    m_materialBindingLayout = nullptr;
+    m_materialBuffer = nullptr;
+    m_materialTextures.clear();
+    m_pipeline = nullptr; // Force pipeline rebuild
+
+    auto commandList = GetDevice()->createCommandList();
+    commandList->open();
+
+    // Create material structured buffer
+    {
+        nvrhi::BufferDesc desc;
+        desc.byteSize = std::max((size_t)1, materials.size()) * sizeof(MaterialParams);
+        desc.structStride = sizeof(MaterialParams);
+        desc.debugName = "MaterialParamsBuffer";
+        desc.initialState = nvrhi::ResourceStates::CopyDest;
+        desc.keepInitialState = false;
+        desc.canHaveRawViews = false;
+        m_materialBuffer = GetDevice()->createBuffer(desc);
+
+        commandList->beginTrackingBufferState(m_materialBuffer, nvrhi::ResourceStates::CopyDest);
+        commandList->writeBuffer(m_materialBuffer, materials.data(), materials.size() * sizeof(MaterialParams));
+        commandList->setPermanentBufferState(m_materialBuffer, nvrhi::ResourceStates::ShaderResource);
+    }
+
+    // Create material sampler
+    if (!m_materialSampler)
+    {
+        nvrhi::SamplerDesc sd;
+        sd.setAllAddressModes(nvrhi::SamplerAddressMode::Repeat);
+        sd.setAllFilters(true);
+        m_materialSampler = GetDevice()->createSampler(sd);
+    }
+
+    // Upload individual textures - store debugName strings to keep them alive
+    std::vector<std::string> texDebugNames(textures.size());
+    m_materialTextures.resize(textures.size());
+    for (size_t i = 0; i < textures.size(); ++i)
+    {
+        const auto& tex = textures[i];
+
+        texDebugNames[i] = tex.name.empty() ? ("MaterialTex_" + std::to_string(i)) : tex.name;
+
+        nvrhi::TextureDesc texDesc;
+        texDesc.width = tex.width;
+        texDesc.height = tex.height;
+        texDesc.format = nvrhi::Format::RGBA8_UNORM;
+        texDesc.dimension = nvrhi::TextureDimension::Texture2D;
+        texDesc.isRenderTarget = false;
+        texDesc.mipLevels = 1;
+        texDesc.debugName = texDebugNames[i].c_str();
+        texDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        texDesc.keepInitialState = false;
+
+        m_materialTextures[i] = GetDevice()->createTexture(texDesc);
+        commandList->beginTrackingTextureState(m_materialTextures[i], nvrhi::TextureSubresourceSet(0, 1, 0, 1), nvrhi::ResourceStates::CopyDest);
+        commandList->writeTexture(m_materialTextures[i], 0, 0, tex.pixels.data(), tex.width * 4);
+        commandList->setPermanentTextureState(m_materialTextures[i], nvrhi::ResourceStates::ShaderResource);
+    }
+
+    commandList->commitBarriers();
+    commandList->close();
+    GetDevice()->executeCommandList(commandList);
+
+    // Create binding layout for material set
+    // registerSpace=2 maps to Vulkan descriptor set 2 via registerSpaceIsDescriptorSet
+    nvrhi::BindingLayoutDesc matLayoutDesc;
+    matLayoutDesc.visibility = nvrhi::ShaderType::Pixel;
+    matLayoutDesc.registerSpace = 2;
+    matLayoutDesc.registerSpaceIsDescriptorSet = true;
+    matLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0)); // t0: material buffer
+
+    // t1: texture array (descriptor array of size N)
+    uint32_t texSlotCount = std::max(1u, (uint32_t)textures.size());
+    auto texArrayItem = nvrhi::BindingLayoutItem::Texture_SRV(1);
+    texArrayItem.size = (uint16_t)texSlotCount;
+    matLayoutDesc.bindings.push_back(texArrayItem);
+
+    matLayoutDesc.bindings.push_back(nvrhi::BindingLayoutItem::Sampler(0)); // s0: sampler
+    m_materialBindingLayout = GetDevice()->createBindingLayout(matLayoutDesc);
+
+    // Create binding set
+    nvrhi::BindingSetDesc matSetDesc;
+    matSetDesc.bindings.push_back(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_materialBuffer));
+
+    if (textures.empty())
+    {
+        // Bind a dummy 1x1 white texture to avoid null binding
+        nvrhi::TextureDesc dummyDesc;
+        dummyDesc.width = 1;
+        dummyDesc.height = 1;
+        dummyDesc.format = nvrhi::Format::RGBA8_UNORM;
+        dummyDesc.debugName = "DummyWhiteTex";
+        dummyDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        dummyDesc.keepInitialState = false;
+
+        auto dummyTex = GetDevice()->createTexture(dummyDesc);
+        uint8_t white[4] = { 255, 255, 255, 255 };
+        auto cmdList2 = GetDevice()->createCommandList();
+        cmdList2->open();
+        cmdList2->beginTrackingTextureState(dummyTex, nvrhi::TextureSubresourceSet(0, 1, 0, 1), nvrhi::ResourceStates::CopyDest);
+        cmdList2->writeTexture(dummyTex, 0, 0, white, 4);
+        cmdList2->setPermanentTextureState(dummyTex, nvrhi::ResourceStates::ShaderResource);
+        cmdList2->commitBarriers();
+        cmdList2->close();
+        GetDevice()->executeCommandList(cmdList2);
+
+        matSetDesc.bindings.push_back(nvrhi::BindingSetItem::Texture_SRV(1, dummyTex));
+        m_materialTextures.push_back(dummyTex); // Keep alive
+    }
+    else
+    {
+        // Each texture is an element in the descriptor array at slot 1
+        for (uint32_t t = 0; t < (uint32_t)textures.size(); ++t)
+        {
+            auto item = nvrhi::BindingSetItem::Texture_SRV(1, m_materialTextures[t]);
+            item.setArrayElement(t);
+            matSetDesc.bindings.push_back(item);
+        }
+    }
+
+    matSetDesc.bindings.push_back(nvrhi::BindingSetItem::Sampler(0, m_materialSampler));
+    m_materialBindingSet = GetDevice()->createBindingSet(matSetDesc, m_materialBindingLayout);
+}
+
 void SimpleInferencing::UpdateGeometryBuffers(const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
 {
     m_indicesNum = (int)indices.size();
 
     if (!m_inputLayout) {
         nvrhi::VertexAttributeDesc attributes[] = {
-            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(0).setElementStride(sizeof(Vertex)),
-            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(1).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(offsetof(Vertex, position)).setBufferIndex(0).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(offsetof(Vertex, normal)).setBufferIndex(0).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("TEXCOORD").setFormat(nvrhi::Format::RG32_FLOAT).setOffset(offsetof(Vertex, uv)).setBufferIndex(0).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("TANGENT").setFormat(nvrhi::Format::RGBA32_FLOAT).setOffset(offsetof(Vertex, tangent)).setBufferIndex(0).setElementStride(sizeof(Vertex)),
+            nvrhi::VertexAttributeDesc().setName("MATERIAL_IDX").setFormat(nvrhi::Format::R32_UINT).setOffset(offsetof(Vertex, materialIndex)).setBufferIndex(0).setElementStride(sizeof(Vertex)),
         };
         m_inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_vertexShader);
     }
+
+    m_pipeline = nullptr; // Force pipeline rebuild with new layout
 
     auto commandList = GetDevice()->createCommandList();
     commandList->open();
@@ -272,6 +415,8 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
         psoDesc.PS = m_pixelShader;
         psoDesc.inputLayout = m_inputLayout;
         psoDesc.bindingLayouts = { m_bindingLayout, m_skyboxRenderer->GetIBLBindingLayout() };
+        if (m_materialBindingLayout)
+            psoDesc.bindingLayouts.push_back(m_materialBindingLayout);
         psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
         psoDesc.renderState.depthStencilState.depthTestEnable = true;
         psoDesc.renderState.depthStencilState.depthWriteEnable = true;
@@ -303,7 +448,11 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
                                    m_userInterfaceParameters->metallic,
                                    m_userInterfaceParameters->enableNeuralShading ? 1u : 0u,
                                    m_weightOffsets,
-                                   m_biasOffsets };
+                                   m_biasOffsets,
+                                   m_hasPerVertexMaterials ? 1u : 0u,
+                                   m_materialCount,
+                                   m_textureCount,
+                                   0u };
     modelConstant.view = affineToHomogeneous(translation(-camPos) * lookatZ(-camDir, camUp));
     modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
     modelConstant.inverseViewProject = inverse(modelConstant.viewProject);
@@ -321,11 +470,14 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
         state.bindings = { m_bindingSet, iblSet };
     else
         state.bindings = { m_bindingSet };
+    
+    if (m_materialBindingSet)
+        state.bindings.push_back(m_materialBindingSet);
+
     state.indexBuffer = { m_indexBuffer, nvrhi::Format::R32_UINT, 0 };
 
     state.vertexBuffers = {
-        { m_vertexBuffer, 0, offsetof(Vertex, position) },
-        { m_vertexBuffer, 1, offsetof(Vertex, normal) },
+        { m_vertexBuffer, 0, 0 },
     };
     state.pipeline = m_pipeline;
     state.framebuffer = framebuffer;

@@ -44,6 +44,7 @@ public:
 
 private:
     void UpdateGeometryBuffers(const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices);
+    void CreateMaterialResources(const std::vector<MaterialParams>& materials, const std::vector<GltfTextureData>& textures);
 
     std::string m_extraStatus;
     nvrhi::TimerQueryHandle m_neuralTimer;
@@ -78,4 +79,15 @@ private:
     
     SimpleCamera m_camera;
     std::unique_ptr<SkyboxRenderer> m_skyboxRenderer;
+
+    // Material system
+    nvrhi::BufferHandle m_materialBuffer;                       // Structured buffer of MaterialParams
+    std::vector<nvrhi::TextureHandle> m_materialTextures;       // Individual Texture2D handles
+    nvrhi::SamplerHandle m_materialSampler;
+    nvrhi::BindingLayoutHandle m_materialBindingLayout;
+    nvrhi::BindingSetHandle m_materialBindingSet;
+    std::vector<MaterialParams> m_materials;
+    uint32_t m_materialCount = 0;
+    uint32_t m_textureCount = 0;
+    bool m_hasPerVertexMaterials = false;
 };

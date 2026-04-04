@@ -41,18 +41,24 @@ donut_compile_shaders_all_platforms(
     SLANG
 )
 
+# MikkTSpace tangent generation library (plain C)
+set(MIKKTSPACE_DIR "${CMAKE_SOURCE_DIR}/external/mikktspace")
+add_library(mikktspace STATIC "${MIKKTSPACE_DIR}/mikktspace.c" "${MIKKTSPACE_DIR}/mikktspace.h")
+target_include_directories(mikktspace PUBLIC "${MIKKTSPACE_DIR}")
+set_target_properties(mikktspace PROPERTIES LINKER_LANGUAGE C FOLDER "Third-Party Libraries")
+
 add_library(${project} STATIC EXCLUDE_FROM_ALL ${sources})
 target_include_directories(${project} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 if (DONUT_WITH_DX12)
-	target_link_libraries(${project} donut_app donut_engine NeuralShading nvapi implot cgltf)
+	target_link_libraries(${project} donut_app donut_engine NeuralShading nvapi implot cgltf stb mikktspace)
     add_dependencies(${project} dx12-agility-sdk ${project}_shaders)
     target_compile_definitions(
 		${project} PRIVATE DONUT_D3D_AGILITY_SDK_VERSION=${DONUT_D3D_AGILITY_SDK_VERSION}
 		${project} PRIVATE DONUT_D3D_AGILITY_PREVIEW_SDK_VERSION=${DONUT_D3D_AGILITY_PREVIEW_SDK_VERSION}
 	)
 else()
-	target_link_libraries(${project} donut_app donut_engine NeuralShading implot cgltf)
+	target_link_libraries(${project} donut_app donut_engine NeuralShading implot cgltf stb mikktspace)
     add_dependencies(${project} ${project}_shaders)
 endif()
 

@@ -14,21 +14,49 @@
 
 #include <vector>
 #include <string>
+#include <cstdint>
 
 struct Vertex
 {
     dm::float3 position;
     dm::float3 normal;
+    dm::float2 uv;
+    dm::float4 tangent; // xyz = tangent direction, w = handedness sign (+1 or -1)
     uint32_t materialIndex;
+    uint32_t _pad0, _pad1, _pad2; // pad to 64 bytes
 };
 
+// GPU material parameters — must match shader struct exactly (16-byte aligned)
 struct MaterialParams
 {
-    dm::float4 baseColor;
-    float roughness; 
+    dm::float4 baseColor;       // RGBA base color factor
+    float roughness;
     float metallic;
     float specular;
-    float padding; // for 16-byte alignment
+    float normalScale;          // normal map strength
+
+    dm::float3 emissiveFactor;
+    float occlusionStrength;
+
+    int baseColorTexIdx;        // -1 = no texture
+    int normalTexIdx;
+    int metallicRoughnessTexIdx;
+    int occlusionTexIdx;
+
+    int emissiveTexIdx;
+    int alphaMode;              // 0=opaque, 1=mask, 2=blend
+    float alphaCutoff;
+    float _pad0;
+};
+
+// Raw texture data loaded from GLTF
+struct GltfTextureData
+{
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    std::vector<uint8_t> pixels; // RGBA8 always
+    std::string name;
 };
 
 struct TextureData
@@ -54,10 +82,11 @@ bool LoadOBJ(
     std::vector<uint32_t>& outMaterialIndices
 );
 
-// Loads a GLTF/GLB file, baking node transforms, and extracting vertices, indices, and materials.
+// Loads a GLTF/GLB file, baking node transforms, and extracting vertices, indices, materials, and textures.
 bool LoadGLTF(
     const std::string& path, 
     std::vector<Vertex>& outVertices, 
     std::vector<uint32_t>& outIndices, 
-    std::vector<MaterialParams>& outMaterials
+    std::vector<MaterialParams>& outMaterials,
+    std::vector<GltfTextureData>& outTextures
 );

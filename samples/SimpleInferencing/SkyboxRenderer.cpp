@@ -74,6 +74,8 @@ bool SkyboxRenderer::Init()
     
     nvrhi::BindingLayoutDesc iblDesc;
     iblDesc.visibility = nvrhi::ShaderType::Pixel;
+    iblDesc.registerSpace = 1;
+    iblDesc.registerSpaceIsDescriptorSet = true;
     iblDesc.bindings = {
         nvrhi::BindingLayoutItem::Texture_SRV(1),  // t_Skybox (Specular)
         nvrhi::BindingLayoutItem::Texture_SRV(2),  // t_Irradiance (Diffuse)
