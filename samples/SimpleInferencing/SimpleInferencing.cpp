@@ -11,6 +11,7 @@
 #include <donut/app/ApplicationBase.h>
 #include <donut/app/imgui_renderer.h>
 #include <donut/engine/ShaderFactory.h>
+#include <donut/engine/CommonRenderPasses.h>
 #include <donut/engine/TextureCache.h>
 #include <donut/app/DeviceManager.h>
 #include <donut/app/UserInterfaceUtils.h>
@@ -110,6 +111,7 @@ public:
         m_rootFS->mount("/", nativeFS);
 
         m_textureCache = std::make_shared<engine::TextureCache>(GetDevice(), nativeFS, nullptr);
+        m_commonPasses = std::make_shared<engine::CommonRenderPasses>(GetDevice(), m_shaderFactory);
 
         LoadSkyboxTexture(GetLocalPath("assets/skybox/kloofendal_43d_clear_1k.exr").string());
 
@@ -183,6 +185,14 @@ public:
             return false;
         }
 
+        nvrhi::BindingLayoutDesc iblDesc;
+        iblDesc.visibility = nvrhi::ShaderType::Pixel;
+        iblDesc.bindings = {
+            nvrhi::BindingLayoutItem::Texture_SRV(1),  // bound to t1
+            nvrhi::BindingLayoutItem::Sampler(0)       // bound to s0 (can overlap safely if shared sampler)
+        };
+        m_iblBindingLayout = GetDevice()->createBindingLayout(iblDesc);
+
         m_neuralTimer = GetDevice()->createTimerQuery();
 
         return true;
@@ -218,7 +228,7 @@ public:
         auto commandList = GetDevice()->createCommandList();
         commandList->open();
         
-        m_skyboxTexture = m_textureCache->LoadTextureFromFile(path, false, nullptr, commandList);
+        m_skyboxTexture = m_textureCache->LoadTextureFromFile(path, false, m_commonPasses.get(), commandList);
         
         commandList->close();
         GetDevice()->executeCommandList(commandList);
@@ -236,6 +246,7 @@ public:
         }
 
         m_skyboxBindingSet = nullptr; // Reset binding set to be rebuilt during Render if needed
+        m_iblBindingSet = nullptr;
     }
 
     void UpdateGeometryBuffers(const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
@@ -375,7 +386,7 @@ public:
             psoDesc.VS = m_vertexShader;
             psoDesc.PS = m_pixelShader;
             psoDesc.inputLayout = m_inputLayout;
-            psoDesc.bindingLayouts = { m_bindingLayout };
+            psoDesc.bindingLayouts = { m_bindingLayout, m_iblBindingLayout };
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
             psoDesc.renderState.depthStencilState.depthTestEnable = true;
             psoDesc.renderState.depthStencilState.depthWriteEnable = true;
@@ -400,9 +411,7 @@ public:
             psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
             
             // Draw behind everything, depth test enabled but write disabled. 
-            // In reversed-Z, depth is 0.0 for far plane by default in nvrhi::utils::ClearDepthStencilAttachment (1.0 is near).
-            // Actually, donut clears to 1.0f in ClearDepthStencilAttachment below, so it's normal depth (1.0 = far).
-            psoDesc.renderState.depthStencilState.depthTestEnable = false; // We draw it first, so just disable depth test/write.
+            psoDesc.renderState.depthStencilState.depthTestEnable = false;
             psoDesc.renderState.depthStencilState.depthWriteEnable = false;
             psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
 
@@ -418,6 +427,13 @@ public:
                 nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer)
             };
             m_skyboxBindingSet = GetDevice()->createBindingSet(setDesc, m_skyboxBindingLayout);
+
+            nvrhi::BindingSetDesc iblSetDesc;
+            iblSetDesc.bindings = {
+                nvrhi::BindingSetItem::Texture_SRV(1, m_skyboxTexture->texture),
+                nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler)
+            };
+            m_iblBindingSet = GetDevice()->createBindingSet(iblSetDesc, m_iblBindingLayout);
         }
 
         m_commandList->open();
@@ -478,7 +494,10 @@ public:
         }
 
         nvrhi::GraphicsState state;
-        state.bindings = { m_bindingSet };
+        if (m_iblBindingSet)
+            state.bindings = { m_bindingSet, m_iblBindingSet };
+        else
+            state.bindings = { m_bindingSet };
         state.indexBuffer = { m_indexBuffer, nvrhi::Format::R32_UINT, 0 };
 
         state.vertexBuffers = {
@@ -537,12 +556,15 @@ private:
     nvrhi::BindingLayoutHandle m_skyboxBindingLayout;
     nvrhi::BindingSetHandle m_skyboxBindingSet;
     nvrhi::GraphicsPipelineHandle m_skyboxPipeline;
+    nvrhi::BindingLayoutHandle m_iblBindingLayout;
+    nvrhi::BindingSetHandle m_iblBindingSet;
     std::shared_ptr<donut::engine::TextureCache> m_textureCache;
     std::shared_ptr<donut::engine::LoadedTexture> m_skyboxTexture;
     std::string m_skyboxPath;
     nvrhi::SamplerHandle m_skyboxSampler;
 
     std::shared_ptr<engine::ShaderFactory> m_shaderFactory;
+    std::shared_ptr<engine::CommonRenderPasses> m_commonPasses;
     std::shared_ptr<vfs::RootFileSystem> m_rootFS;
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
 
