@@ -37,7 +37,7 @@ void UserInterface::buildUI()
     ImGui::SliderFloat3("Light Direction", &m_userInterfaceParameters->lightDir.x, -1.0f, 1.0f);
     ImGui::SliderFloat("Light Intensity", &m_userInterfaceParameters->lightIntensity, 0.f, 20.f);
     ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
-    ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
+    ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.0f, 1.f);
     ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
     ImGui::Checkbox("Enable Neural Shading", &m_userInterfaceParameters->enableNeuralShading);
 

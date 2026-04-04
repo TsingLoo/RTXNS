@@ -8,6 +8,14 @@
 #include <string>
 #include <memory>
 
+struct IBLConstants
+{
+    float roughness;
+    float cubeSize;
+    float pad0;
+    float pad1;
+};
+
 class SkyboxRenderer
 {
 public:
@@ -47,7 +55,18 @@ private:
     nvrhi::SamplerHandle m_skyboxSampler;
     nvrhi::TextureHandle m_skyboxCubemap;
     nvrhi::TextureHandle m_irradianceCubemap;
+    nvrhi::TextureHandle m_specularCubemap;
+    nvrhi::TextureHandle m_brdfLutTexture;
     nvrhi::ShaderHandle m_equirectToCubeCS;
     nvrhi::BindingLayoutHandle m_equirectToCubeBindingLayout;
     nvrhi::ComputePipelineHandle m_equirectToCubePipeline;
+
+    nvrhi::ShaderHandle m_irradianceCS;
+    nvrhi::BindingLayoutHandle m_irradianceBindingLayout;
+    nvrhi::ComputePipelineHandle m_irradiancePipeline;
+
+    nvrhi::ShaderHandle m_glossyCS;
+    nvrhi::BindingLayoutHandle m_glossyBindingLayout;
+    nvrhi::ComputePipelineHandle m_glossyPipeline;
+    nvrhi::BufferHandle m_convolutionCB;
 };

@@ -1,5 +1,6 @@
 #include "SkyboxRenderer.h"
 #include <donut/core/log.h>
+#include <nvrhi/utils.h>
 
 using namespace donut;
 
@@ -42,11 +43,42 @@ bool SkyboxRenderer::Init()
     cpDesc.bindingLayouts = { m_equirectToCubeBindingLayout };
     m_equirectToCubePipeline = m_device->createComputePipeline(cpDesc);
     
+    m_irradianceCS = m_shaderFactory->CreateShader("app/IrradianceConvolution", "main_cs", nullptr, nvrhi::ShaderType::Compute);
+    if (!m_irradianceCS) return false;
+
+    m_irradianceBindingLayout = m_device->createBindingLayout(blDescCS); // Same layout shape
+    nvrhi::ComputePipelineDesc cpIrrDesc;
+    cpIrrDesc.CS = m_irradianceCS;
+    cpIrrDesc.bindingLayouts = { m_irradianceBindingLayout };
+    m_irradiancePipeline = m_device->createComputePipeline(cpIrrDesc);
+    
+    m_convolutionCB = m_device->createBuffer(nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(IBLConstants), "IBL Convolution CB").setInitialState(nvrhi::ResourceStates::ConstantBuffer).setKeepInitialState(true));
+
+    m_glossyCS = m_shaderFactory->CreateShader("app/GlossyConvolution", "main_cs", nullptr, nvrhi::ShaderType::Compute);
+    if (!m_glossyCS) return false;
+
+    nvrhi::BindingLayoutDesc blDescGlossy;
+    blDescGlossy.visibility = nvrhi::ShaderType::Compute;
+    blDescGlossy.bindings = {
+        nvrhi::BindingLayoutItem::Texture_SRV(0),
+        nvrhi::BindingLayoutItem::Sampler(0),
+        nvrhi::BindingLayoutItem::Texture_UAV(0),
+        nvrhi::BindingLayoutItem::ConstantBuffer(0)
+    };
+    m_glossyBindingLayout = m_device->createBindingLayout(blDescGlossy);
+
+    nvrhi::ComputePipelineDesc cpGlossyDesc;
+    cpGlossyDesc.CS = m_glossyCS;
+    cpGlossyDesc.bindingLayouts = { m_glossyBindingLayout };
+    m_glossyPipeline = m_device->createComputePipeline(cpGlossyDesc);
+    
     nvrhi::BindingLayoutDesc iblDesc;
     iblDesc.visibility = nvrhi::ShaderType::Pixel;
     iblDesc.bindings = {
         nvrhi::BindingLayoutItem::Texture_SRV(1),  // t_Skybox (Specular)
         nvrhi::BindingLayoutItem::Texture_SRV(2),  // t_Irradiance (Diffuse)
+        nvrhi::BindingLayoutItem::Texture_SRV(3),  // t_SpecularCubemap (Prefiltered)
+        nvrhi::BindingLayoutItem::Texture_SRV(4),  // t_BRDFLut (LUT)
         nvrhi::BindingLayoutItem::Sampler(0)       // shared sampler
     };
     m_iblBindingLayout = m_device->createBindingLayout(iblDesc);
@@ -117,6 +149,41 @@ void SkyboxRenderer::LoadSkyboxTexture(const std::string& path)
 
     commandList->setTextureState(m_skyboxCubemap, nvrhi::TextureSubresourceSet(0, cubeDesc.mipLevels, 0, 6), nvrhi::ResourceStates::ShaderResource);
 
+    cubeDesc.isUAV = true;
+    cubeDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+    cubeDesc.debugName = "SpecularCubemap";
+    m_specularCubemap = m_device->createTexture(cubeDesc);
+
+    for (uint32_t mip = 0; mip < cubeDesc.mipLevels; ++mip)
+    {
+        float roughness = (float)mip / (float)(cubeDesc.mipLevels - 1);
+
+        IBLConstants consts;
+        consts.roughness = roughness;
+        consts.cubeSize = (float)cubeSize;
+        consts.pad0 = 0;
+        consts.pad1 = 0;
+        commandList->writeBuffer(m_convolutionCB, &consts, sizeof(consts));
+
+        nvrhi::BindingSetDesc glossyBSDesc;
+        glossyBSDesc.bindings = {
+            nvrhi::BindingSetItem::Texture_SRV(0, m_skyboxCubemap),
+            nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler),
+            nvrhi::BindingSetItem::Texture_UAV(0, m_specularCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(mip, 1, 0, 6)),
+            nvrhi::BindingSetItem::ConstantBuffer(0, m_convolutionCB)
+        };
+        nvrhi::BindingSetHandle glossyBS = m_device->createBindingSet(glossyBSDesc, m_glossyBindingLayout);
+
+        nvrhi::ComputeState glossyState;
+        glossyState.pipeline = m_glossyPipeline;
+        glossyState.bindings = { glossyBS };
+
+        uint32_t currentSize = std::max(1u, cubeSize >> mip);
+        commandList->setComputeState(glossyState);
+        commandList->dispatch((currentSize + 7) / 8, (currentSize + 7) / 8, 6);
+    }
+    commandList->setTextureState(m_specularCubemap, nvrhi::TextureSubresourceSet(0, cubeDesc.mipLevels, 0, 6), nvrhi::ResourceStates::ShaderResource);
+
     nvrhi::TextureDesc irrDesc;
     irrDesc.width = 32;
     irrDesc.height = 32;
@@ -124,15 +191,33 @@ void SkyboxRenderer::LoadSkyboxTexture(const std::string& path)
     irrDesc.dimension = nvrhi::TextureDimension::TextureCube;
     irrDesc.format = nvrhi::Format::RGBA16_FLOAT;
     irrDesc.isRenderTarget = true;
+    irrDesc.isUAV = true;
     irrDesc.mipLevels = 1;
     irrDesc.debugName = "IrradianceCubemap";
-    irrDesc.initialState = nvrhi::ResourceStates::RenderTarget;
+    irrDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
     irrDesc.keepInitialState = true;
     m_irradianceCubemap = m_device->createTexture(irrDesc);
 
-    m_lightProbePass->RenderDiffuseMap(commandList, m_skyboxCubemap, nvrhi::TextureSubresourceSet(0, 1, 0, 6), m_irradianceCubemap, 0, 0);
+    nvrhi::BindingSetDesc irrBSDesc;
+    irrBSDesc.bindings = {
+        nvrhi::BindingSetItem::Texture_SRV(0, m_skyboxCubemap),
+        nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler),
+        nvrhi::BindingSetItem::Texture_UAV(0, m_irradianceCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(0, 1, 0, 6))
+    };
+    nvrhi::BindingSetHandle irrBS = m_device->createBindingSet(irrBSDesc, m_irradianceBindingLayout);
+
+    nvrhi::ComputeState irrState;
+    irrState.pipeline = m_irradiancePipeline;
+    irrState.bindings = { irrBS };
+
+    commandList->setComputeState(irrState);
+    commandList->dispatch((irrDesc.width + 7) / 8, (irrDesc.height + 7) / 8, 6);
 
     commandList->setTextureState(m_irradianceCubemap, nvrhi::TextureSubresourceSet(0, 1, 0, 6), nvrhi::ResourceStates::ShaderResource);
+
+    m_lightProbePass->RenderEnvironmentBrdfTexture(commandList);
+    m_brdfLutTexture = m_lightProbePass->GetEnvironmentBrdfTexture();
+    commandList->setTextureState(m_brdfLutTexture, nvrhi::TextureSubresourceSet(0, 1, 0, 1), nvrhi::ResourceStates::ShaderResource);
 
     commandList->close();
     m_device->executeCommandList(commandList);
@@ -186,6 +271,8 @@ void SkyboxRenderer::Render(nvrhi::ICommandList* commandList, nvrhi::IFramebuffe
         iblSetDesc.bindings = {
             nvrhi::BindingSetItem::Texture_SRV(1, m_skyboxCubemap),
             nvrhi::BindingSetItem::Texture_SRV(2, m_irradianceCubemap),
+            nvrhi::BindingSetItem::Texture_SRV(3, m_specularCubemap),
+            nvrhi::BindingSetItem::Texture_SRV(4, m_brdfLutTexture),
             nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler)
         };
         m_iblBindingSet = m_device->createBindingSet(iblSetDesc, m_iblBindingLayout);

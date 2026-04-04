@@ -19,7 +19,10 @@ DECLARE_CBUFFER(NeuralConstants, gConst, 0, 0);
 ByteAddressBuffer gMLPParams            :REGISTER_SRV(0, 0);
 
 TextureCube<float4> t_Skybox            : REGISTER_SRV(1, 1);
-TextureCube<float4> t_Irradiance        : REGISTER_SRV(1, 2);
+TextureCube<float4> t_Irradiance        : REGISTER_SRV(2, 1);
+TextureCube<float4> t_Specular          : REGISTER_SRV(3, 1);
+Texture2D<float4>   t_BRDFLut           : REGISTER_SRV(4, 1);
+
 SamplerState s_Skybox                 : REGISTER_SAMPLER(0, 1);
 
 struct VertexIn
@@ -143,16 +146,7 @@ float4 DisneyMLP(float NdotL, float NdotV, float NdotH, float LdotH, float rough
     return float4(outputParams[0], outputParams[1], outputParams[2], outputParams[3]);
 }
 
-// Unreal Engine 4 analytical approximation for EnvBRDF (LUT replacement)
-float3 EnvBRDFApprox(float3 SpecularColor, float Roughness, float NoV)
-{
-    float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
-    float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
-    float4 r = Roughness * c0 + c1;
-    float a004 = min(r.x * r.x, exp2(-9.28 * NoV)) * r.x + r.y;
-    float2 AB = float2(-1.04, 1.04) * a004 + r.zw;
-    return SpecularColor * AB.x + AB.y;
-}
+
 
 [shader("fragment")]
 void main_ps( 
@@ -196,12 +190,20 @@ void main_ps(
     // --- Image-Based Lighting Evaluation ---
     float3 R = reflect(-view, norm);
 
-    float max_mip = 10.0; // Rough approximation. Donut TextureCache will generate full mip chain.
+    const float MAX_REFLECTION_LOD = 10.0; // The true generated specular mips
     float3 iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, norm, 0.0).rgb;
-    float3 iblSpecular = t_Skybox.SampleLevel(s_Skybox, R, roughness * max_mip).rgb;
+    
+    // For near-perfect mirrors, sample the raw skybox to avoid Donut's 256x256 internal intermediate limit
+    float lod = roughness * MAX_REFLECTION_LOD;
+    float3 iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
+    if (roughness < 0.04) {
+        float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
+        iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
+    }
 
-    // Analytical EnvBRDF takes the role of the 2D LUT texture lookup
-    float3 envSpecular = iblSpecular * EnvBRDFApprox(Cspec0, roughness, NdotV);
+    // Clamp UVs to prevent the repeatable SamplerState from interpolating across 0.0 and 1.0 edges at exactly NdotV=1.0 (the center of the sphere)
+    float2 envBRDF = t_BRDFLut.SampleLevel(s_Skybox, clamp(float2(NdotV, roughness), 0.01, 0.99), 0).rg;
+    float3 envSpecular = iblSpecular * (Cspec0 * envBRDF.x + envBRDF.y);
 
     // Diffuse component (kD is evaluated from max fresnel analytically or simply estimated)
     float3 fresnelRoughness = Cspec0 + (max(float3(1.0 - roughness), Cspec0) - Cspec0) * pow(1.0 - NdotV, 5.0);
