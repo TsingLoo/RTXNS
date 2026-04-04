@@ -29,7 +29,8 @@ VSOutput main_vs(uint vertexID : SV_VertexID)
 
     // Calculate view direction for this pixel by unprojecting clip space coordinates
     float4 posWorld = mul(posClip, constants.inverseViewProject);
-    output.viewDir = normalize(posWorld.xyz / posWorld.w);
+    float3 worldPos = posWorld.xyz / posWorld.w;
+    output.viewDir = normalize(worldPos - constants.cameraPos.xyz);
 
     return output;
 }

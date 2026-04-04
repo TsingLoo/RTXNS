@@ -1,0 +1,12 @@
+#pragma once
+#include <donut/core/math/math.h>
+
+struct UIData
+{
+    float lightIntensity = 1.f;
+    float specular = 0.5f;
+    float roughness = 0.4f;
+    float metallic = 0.7f;
+    donut::math::float3 lightDir = { -0.761f, -0.467f, -0.450f };
+    bool enableNeuralShading = true;
+};
