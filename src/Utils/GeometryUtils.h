@@ -13,6 +13,7 @@
 #include <donut/core/math/math.h>
 
 #include <vector>
+#include <string>
 
 struct Vertex
 {
@@ -20,4 +21,22 @@ struct Vertex
     dm::float3 normal;
 };
 
+struct MaterialParams
+{
+    dm::float4 baseColor;
+    float roughness;
+    float metallic;
+    float specular;
+    float padding; // for 16-byte alignment
+};
+
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV);
+
+// Loads a GLTF/GLB file, baking node transforms, and extracting vertices, indices, and materials.
+bool LoadGLTF(
+    const std::string& path, 
+    std::vector<Vertex>& outVertices, 
+    std::vector<uint32_t>& outIndices, 
+    std::vector<MaterialParams>& outMaterials,
+    std::vector<uint32_t>& outMaterialIndices
+);

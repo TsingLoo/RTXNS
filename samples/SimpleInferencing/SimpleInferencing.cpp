@@ -11,9 +11,8 @@
 #include <donut/app/ApplicationBase.h>
 #include <donut/app/imgui_renderer.h>
 #include <donut/engine/ShaderFactory.h>
-#include <donut/engine/TextureCache.h>
-#include <donut/engine/CommonRenderPasses.h>
 #include <donut/app/DeviceManager.h>
+#include <donut/app/UserInterfaceUtils.h>
 #include <donut/core/log.h>
 #include <donut/core/vfs/VFS.h>
 #include <nvrhi/utils.h>
@@ -46,7 +45,7 @@ struct UIData
 class SimpleInferencing : public app::IRenderPass
 {
 public:
-    SimpleInferencing(app::DeviceManager* deviceManager, UIData* uiParams) : IRenderPass(deviceManager), m_userInterfaceParameters(uiParams)
+    SimpleInferencing(app::DeviceManager* deviceManager, UIData* uiParams, const std::string& modelPath) : IRenderPass(deviceManager), m_userInterfaceParameters(uiParams), m_modelPath(modelPath)
     {
     }
 
@@ -99,49 +98,20 @@ public:
             return false;
         }
 
-        auto [vertices, indices] = GenerateSphere(1, 64, 64);
-        m_indicesNum = (int)indices.size();
-
-        m_constantBuffer = GetDevice()->createBuffer(
-            nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(NeuralConstants), "ConstantBuffer").setInitialState(nvrhi::ResourceStates::ConstantBuffer).setKeepInitialState(true));
-
-        nvrhi::VertexAttributeDesc attributes[] = {
-            nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(0).setElementStride(sizeof(Vertex)),
-            nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(1).setElementStride(sizeof(Vertex)),
-        };
-        m_inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_vertexShader);
-
-        engine::CommonRenderPasses commonPasses(GetDevice(), m_shaderFactory);
-
-        auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
-        engine::TextureCache textureCache(GetDevice(), nativeFS, nullptr);
-
-        m_commandList = GetDevice()->createCommandList();
-        m_commandList->open();
-
-        nvrhi::BufferDesc vertexBufferDesc;
-        vertexBufferDesc.byteSize = vertices.size() * sizeof(vertices[0]);
-        vertexBufferDesc.isVertexBuffer = true;
-        vertexBufferDesc.debugName = "VertexBuffer";
-        vertexBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
-        m_vertexBuffer = GetDevice()->createBuffer(vertexBufferDesc);
-
-        m_commandList->beginTrackingBufferState(m_vertexBuffer, nvrhi::ResourceStates::CopyDest);
-        m_commandList->writeBuffer(m_vertexBuffer, vertices.data(), vertices.size() * sizeof(vertices[0]));
-        m_commandList->setPermanentBufferState(m_vertexBuffer, nvrhi::ResourceStates::VertexBuffer);
-
-        nvrhi::BufferDesc indexBufferDesc;
-        indexBufferDesc.byteSize = indices.size() * sizeof(indices[0]);
-        indexBufferDesc.isIndexBuffer = true;
-        indexBufferDesc.debugName = "IndexBuffer";
-        indexBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
-        m_indexBuffer = GetDevice()->createBuffer(indexBufferDesc);
-
-        m_commandList->beginTrackingBufferState(m_indexBuffer, nvrhi::ResourceStates::CopyDest);
-        m_commandList->writeBuffer(m_indexBuffer, indices.data(), indices.size() * sizeof(indices[0]));
-        m_commandList->setPermanentBufferState(m_indexBuffer, nvrhi::ResourceStates::IndexBuffer);
+        if (!m_modelPath.empty())
+        {
+            LoadModel(m_modelPath);
+        }
+        else
+        {
+            auto sphere = GenerateSphere(1, 64, 64);
+            std::vector<MaterialParams> mats;
+            std::vector<uint32_t> matIds;
+            UpdateGeometryBuffers(sphere.first, sphere.second);
+        }
 
         ////////////////////
+
         //
         // Create buffers for storing the neural parameters/weights and biases
         //
@@ -163,6 +133,9 @@ public:
         bufferDesc.debugName = "MLPParamsByteAddressBuffer";
         bufferDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
         m_mlpDeviceBuffer = GetDevice()->createBuffer(bufferDesc);
+
+        m_commandList = GetDevice()->createCommandList();
+        m_commandList->open();
 
         // Upload the parameters
         m_commandList->writeBuffer(m_mlpHostBuffer, params.data(), params.size());
@@ -203,6 +176,70 @@ public:
     std::shared_ptr<engine::ShaderFactory> GetShaderFactory() const
     {
         return m_shaderFactory;
+    }
+
+    bool LoadModel(const std::string& path)
+    {
+        std::vector<Vertex> vertices;
+        std::vector<uint32_t> indices;
+        std::vector<MaterialParams> mats;
+        std::vector<uint32_t> matIndices;
+
+        if (!LoadGLTF(path, vertices, indices, mats, matIndices))
+        {
+            log::error("Failed to load GLTF model: %s", path.c_str());
+            return false;
+        }
+
+        m_modelPath = path;
+        UpdateGeometryBuffers(vertices, indices);
+        return true;
+    }
+
+    void UpdateGeometryBuffers(const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
+    {
+        m_indicesNum = (int)indices.size();
+
+        if (!m_constantBuffer) {
+            m_constantBuffer = GetDevice()->createBuffer(
+                nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(NeuralConstants), "ConstantBuffer").setInitialState(nvrhi::ResourceStates::ConstantBuffer).setKeepInitialState(true));
+        }
+
+        if (!m_inputLayout) {
+            nvrhi::VertexAttributeDesc attributes[] = {
+                nvrhi::VertexAttributeDesc().setName("POSITION").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(0).setElementStride(sizeof(Vertex)),
+                nvrhi::VertexAttributeDesc().setName("NORMAL").setFormat(nvrhi::Format::RGB32_FLOAT).setOffset(0).setBufferIndex(1).setElementStride(sizeof(Vertex)),
+            };
+            m_inputLayout = GetDevice()->createInputLayout(attributes, uint32_t(std::size(attributes)), m_vertexShader);
+        }
+
+        auto commandList = GetDevice()->createCommandList();
+        commandList->open();
+
+        nvrhi::BufferDesc vertexBufferDesc;
+        vertexBufferDesc.byteSize = vertices.size() * sizeof(vertices[0]);
+        vertexBufferDesc.isVertexBuffer = true;
+        vertexBufferDesc.debugName = "VertexBuffer";
+        vertexBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        m_vertexBuffer = GetDevice()->createBuffer(vertexBufferDesc);
+
+        commandList->beginTrackingBufferState(m_vertexBuffer, nvrhi::ResourceStates::CopyDest);
+        commandList->writeBuffer(m_vertexBuffer, vertices.data(), vertices.size() * sizeof(vertices[0]));
+        commandList->setPermanentBufferState(m_vertexBuffer, nvrhi::ResourceStates::VertexBuffer);
+
+        nvrhi::BufferDesc indexBufferDesc;
+        indexBufferDesc.byteSize = indices.size() * sizeof(indices[0]);
+        indexBufferDesc.isIndexBuffer = true;
+        indexBufferDesc.debugName = "IndexBuffer";
+        indexBufferDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        m_indexBuffer = GetDevice()->createBuffer(indexBufferDesc);
+
+        commandList->beginTrackingBufferState(m_indexBuffer, nvrhi::ResourceStates::CopyDest);
+        commandList->writeBuffer(m_indexBuffer, indices.data(), indices.size() * sizeof(indices[0]));
+        commandList->setPermanentBufferState(m_indexBuffer, nvrhi::ResourceStates::IndexBuffer);
+
+        commandList->close();
+        GetDevice()->executeCommandList(commandList);
     }
 
     bool MousePosUpdate(double xpos, double ypos) override
@@ -359,6 +396,7 @@ private:
     bool m_pressedFlag = false;
 
     int m_indicesNum = 0;
+    std::string m_modelPath;
 
     dm::uint4 m_weightOffsets; // Offsets to weight matrices in bytes.
     dm::uint4 m_biasOffsets; // Offsets to bias vectors in bytes.
@@ -370,9 +408,10 @@ class UserInterface : public app::ImGui_Renderer
 {
 private:
     UIData* m_userInterfaceParameters;
+    SimpleInferencing* m_app;
 
 public:
-    UserInterface(app::DeviceManager* deviceManager, UIData* uiParams) : ImGui_Renderer(deviceManager), m_userInterfaceParameters(uiParams)
+    UserInterface(app::DeviceManager* deviceManager, UIData* uiParams, SimpleInferencing* app) : ImGui_Renderer(deviceManager), m_userInterfaceParameters(uiParams), m_app(app)
     {
         ImGui::GetIO().IniFilename = nullptr;
     }
@@ -381,6 +420,16 @@ public:
     {
         ImGui::SetNextWindowPos(ImVec2(10.f, 10.f), 0);
         ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+
+        if (ImGui::Button("Load GLTF Model"))
+        {
+            std::string fileName;
+            if (donut::app::FileDialog(true, "GLTF Files\0*.gltf;*.glb\0All Files\0*.*\0\0", fileName))
+            {
+                m_app->LoadModel(fileName);
+            }
+        }
+        ImGui::Separator();
 
         ImGui::SliderFloat("Light Intensity", &m_userInterfaceParameters->lightIntensity, 0.f, 20.f);
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
@@ -442,8 +491,18 @@ int main(int __argc, const char** __argv)
 
     {
         UIData uiData;
-        SimpleInferencing example(deviceManager.get(), &uiData);
-        UserInterface gui(deviceManager.get(), &uiData);
+        std::string gltfPath;
+        for (int i = 1; i < __argc; ++i)
+        {
+            if (std::string(__argv[i]) == "-model" && i + 1 < __argc)
+            {
+                gltfPath = __argv[i + 1];
+                i++;
+            }
+        }
+        
+        SimpleInferencing example(deviceManager.get(), &uiData, gltfPath);
+        UserInterface gui(deviceManager.get(), &uiData, &example);
 
         if (example.Init() && gui.Init(example.GetShaderFactory()))
         {
