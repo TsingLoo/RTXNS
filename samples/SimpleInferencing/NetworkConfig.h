@@ -24,6 +24,7 @@ struct NeuralConstants
 {
     // Scene setup
     float4x4 viewProject;
+    float4x4 inverseViewProject;
     float4x4 view;
     float4 cameraPos;
 

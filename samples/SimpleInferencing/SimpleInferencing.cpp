@@ -11,6 +11,7 @@
 #include <donut/app/ApplicationBase.h>
 #include <donut/app/imgui_renderer.h>
 #include <donut/engine/ShaderFactory.h>
+#include <donut/engine/TextureCache.h>
 #include <donut/app/DeviceManager.h>
 #include <donut/app/UserInterfaceUtils.h>
 #include <donut/app/Camera.h>
@@ -96,10 +97,21 @@ public:
         m_vertexShader = m_shaderFactory->CreateShader("app/SimpleInferencing", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_pixelShader = m_shaderFactory->CreateShader("app/SimpleInferencing", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
 
-        if (!m_vertexShader || !m_pixelShader)
+        m_skyboxVertexShader = m_shaderFactory->CreateShader("app/Skybox", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
+        m_skyboxPixelShader = m_shaderFactory->CreateShader("app/Skybox", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+
+        if (!m_vertexShader || !m_pixelShader || !m_skyboxVertexShader || !m_skyboxPixelShader)
         {
             return false;
         }
+
+        m_rootFS = rootFS;
+        auto nativeFS = std::make_shared<vfs::NativeFileSystem>();
+        m_rootFS->mount("/", nativeFS);
+
+        m_textureCache = std::make_shared<engine::TextureCache>(GetDevice(), nativeFS, nullptr);
+
+        LoadSkyboxTexture(GetLocalPath("assets/skybox/kloofendal_43d_clear_1k.exr").string());
 
         if (!m_modelPath.empty())
         {
@@ -197,6 +209,33 @@ public:
         m_modelPath = path;
         UpdateGeometryBuffers(vertices, indices);
         return true;
+    }
+
+    void LoadSkyboxTexture(const std::string& path)
+    {
+        m_skyboxPath = path;
+        
+        auto commandList = GetDevice()->createCommandList();
+        commandList->open();
+        
+        m_skyboxTexture = m_textureCache->LoadTextureFromFile(path, false, nullptr, commandList);
+        
+        commandList->close();
+        GetDevice()->executeCommandList(commandList);
+
+        if (!m_skyboxTexture || !m_skyboxTexture->texture) {
+            log::warning("Failed to load skybox texture: %s", path.c_str());
+            return;
+        }
+
+        if (!m_skyboxSampler) {
+            nvrhi::SamplerDesc samplerDesc;
+            samplerDesc.setAllAddressModes(nvrhi::SamplerAddressMode::Repeat);
+            samplerDesc.setAllFilters(true);
+            m_skyboxSampler = GetDevice()->createSampler(samplerDesc);
+        }
+
+        m_skyboxBindingSet = nullptr; // Reset binding set to be rebuilt during Render if needed
     }
 
     void UpdateGeometryBuffers(const std::vector<Vertex>& vertices, const std::vector<uint32_t>& indices)
@@ -317,6 +356,7 @@ public:
     void BackBufferResizing() override
     {
         m_pipeline = nullptr;
+        m_skyboxPipeline = nullptr;
     }
 
     void Render(nvrhi::IFramebuffer* framebuffer) override
@@ -343,9 +383,46 @@ public:
             m_pipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer->getFramebufferInfo());
         }
 
+        if (!m_skyboxPipeline)
+        {
+            nvrhi::GraphicsPipelineDesc psoDesc;
+            psoDesc.VS = m_skyboxVertexShader;
+            psoDesc.PS = m_skyboxPixelShader;
+            nvrhi::BindingLayoutDesc blDesc;
+            blDesc.visibility = nvrhi::ShaderType::All;
+            blDesc.bindings = {
+                nvrhi::BindingLayoutItem::Texture_SRV(0),
+                nvrhi::BindingLayoutItem::Sampler(0),
+                nvrhi::BindingLayoutItem::ConstantBuffer(0)
+            };
+            m_skyboxBindingLayout = GetDevice()->createBindingLayout(blDesc);
+            psoDesc.bindingLayouts = { m_skyboxBindingLayout };
+            psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
+            
+            // Draw behind everything, depth test enabled but write disabled. 
+            // In reversed-Z, depth is 0.0 for far plane by default in nvrhi::utils::ClearDepthStencilAttachment (1.0 is near).
+            // Actually, donut clears to 1.0f in ClearDepthStencilAttachment below, so it's normal depth (1.0 = far).
+            psoDesc.renderState.depthStencilState.depthTestEnable = false; // We draw it first, so just disable depth test/write.
+            psoDesc.renderState.depthStencilState.depthWriteEnable = false;
+            psoDesc.renderState.rasterState.cullMode = nvrhi::RasterCullMode::None;
+
+            m_skyboxPipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer->getFramebufferInfo());
+        }
+
+        if (!m_skyboxBindingSet && m_skyboxTexture && m_skyboxTexture->texture)
+        {
+            nvrhi::BindingSetDesc setDesc;
+            setDesc.bindings = {
+                nvrhi::BindingSetItem::Texture_SRV(0, m_skyboxTexture->texture),
+                nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler),
+                nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer)
+            };
+            m_skyboxBindingSet = GetDevice()->createBindingSet(setDesc, m_skyboxBindingLayout);
+        }
+
         m_commandList->open();
 
-        nvrhi::utils::ClearColorAttachment(m_commandList, framebuffer, 0, nvrhi::Color(0.f));
+        // Skybox rendering replaces the solid background clear color.
         auto fbDesc = framebuffer->getDesc();
         if (fbDesc.depthAttachment.valid())
         {
@@ -365,6 +442,7 @@ public:
         ////////////////////
         NeuralConstants modelConstant{ {},
                                        {},
+                                       {},
                                        { camPos.x, camPos.y, camPos.z, 0 },
                                        float4(normalize(m_userInterfaceParameters->lightDir), 1.f),
                                        float4(m_userInterfaceParameters->lightIntensity),
@@ -377,9 +455,27 @@ public:
                                        m_biasOffsets };
         modelConstant.view = affineToHomogeneous(translation(-camPos) * lookatZ(-camDir, camUp));
         modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
+        modelConstant.inverseViewProject = inverse(modelConstant.viewProject);
 
         // Upload the constant buffer.
         m_commandList->writeBuffer(m_constantBuffer, &modelConstant, sizeof(modelConstant));
+
+        // Render Skybox first
+        if (m_skyboxPipeline && m_skyboxBindingSet)
+        {
+            nvrhi::GraphicsState skyboxState;
+            skyboxState.bindings = { m_skyboxBindingSet };
+            skyboxState.pipeline = m_skyboxPipeline;
+            skyboxState.framebuffer = framebuffer;
+            const nvrhi::Viewport viewport = nvrhi::Viewport(left, left + width, top, top + height, 0.f, 1.f);
+            skyboxState.viewport.addViewportAndScissorRect(viewport);
+
+            m_commandList->setGraphicsState(skyboxState);
+            
+            nvrhi::DrawArguments args;
+            args.vertexCount = 3;
+            m_commandList->draw(args);
+        }
 
         nvrhi::GraphicsState state;
         state.bindings = { m_bindingSet };
@@ -435,7 +531,19 @@ private:
     nvrhi::GraphicsPipelineHandle m_pipeline;
     nvrhi::CommandListHandle m_commandList;
 
+    // Skybox rendering
+    nvrhi::ShaderHandle m_skyboxVertexShader;
+    nvrhi::ShaderHandle m_skyboxPixelShader;
+    nvrhi::BindingLayoutHandle m_skyboxBindingLayout;
+    nvrhi::BindingSetHandle m_skyboxBindingSet;
+    nvrhi::GraphicsPipelineHandle m_skyboxPipeline;
+    std::shared_ptr<donut::engine::TextureCache> m_textureCache;
+    std::shared_ptr<donut::engine::LoadedTexture> m_skyboxTexture;
+    std::string m_skyboxPath;
+    nvrhi::SamplerHandle m_skyboxSampler;
+
     std::shared_ptr<engine::ShaderFactory> m_shaderFactory;
+    std::shared_ptr<vfs::RootFileSystem> m_rootFS;
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
 
     float3 m_cameraTarget{ 0.f, 0.f, 0.f };
@@ -479,6 +587,15 @@ public:
             if (donut::app::FileDialog(true, "GLTF Files\0*.gltf;*.glb\0All Files\0*.*\0\0", fileName))
             {
                 m_app->LoadModel(fileName);
+            }
+        }
+        
+        if (ImGui::Button("Load HDRI Skybox"))
+        {
+            std::string fileName;
+            if (donut::app::FileDialog(true, "HDR Files\0*.hdr;*.exr\0All Files\0*.*\0\0", fileName))
+            {
+                m_app->LoadSkyboxTexture(fileName);
             }
         }
         ImGui::Separator();

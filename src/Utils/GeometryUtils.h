@@ -24,11 +24,23 @@ struct Vertex
 struct MaterialParams
 {
     dm::float4 baseColor;
-    float roughness;
+    float roughness; 
     float metallic;
     float specular;
     float padding; // for 16-byte alignment
 };
+
+struct TextureData
+{
+    std::string path;
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    std::vector<float> data_float; // Raw HDR floating point pixel data
+};
+
+// Load an HDR or EXR environment map
+bool LoadHDRI(const std::string& path, TextureData& outTexture);
 
 std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radius, uint32_t segmentsU, uint32_t segmentsV);
 
