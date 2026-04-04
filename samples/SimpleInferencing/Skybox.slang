@@ -1,6 +1,6 @@
 
 
-Texture2D<float4> t_Skybox : register(t0);
+TextureCube<float4> t_Skybox : register(t0);
 SamplerState s_Skybox : register(s0);
 
 #include "NetworkConfig.h"
@@ -38,12 +38,6 @@ VSOutput main_vs(uint vertexID : SV_VertexID)
 float4 main_ps(VSOutput input) : SV_Target
 {
     float3 d = normalize(input.viewDir);
-    
-    // Convert 3D direction to 2D equirectangular UVs
-    float2 uv;
-    uv.x = atan2(d.z, d.x) * 0.15915494309 + 0.5; // (1 / 2*PI)
-    uv.y = asin(-d.y) * 0.31830988618 + 0.5;      // (1 / PI)
-    
-    float4 color = t_Skybox.SampleLevel(s_Skybox, uv, 0); // No mipmaps since we don't calculate analytic gradients here
+    float4 color = t_Skybox.SampleLevel(s_Skybox, d, 0); 
     return float4(color.rgb, 1.0);
 }

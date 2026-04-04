@@ -37,7 +37,7 @@ struct NeuralConstants
     float specular;
     float roughness;
     float metallic;
-    float padding;
+    uint enableNeuralShading;
 
     // Neural weight & bias offsets
     uint4 weightOffsets; // Offsets to weight matrices in bytes.

@@ -40,7 +40,7 @@ donut_compile_shaders_all_platforms(
 )
 
 add_executable(${project} WIN32 ${${project}_sources})
-target_link_libraries(${project} donut_app donut_engine NeuralShading Utils)
+target_link_libraries(${project} donut_app donut_engine donut_render NeuralShading Utils)
 add_dependencies(${project} ${project}_shaders)
 set_target_properties(${project} PROPERTIES FOLDER ${folder})
 

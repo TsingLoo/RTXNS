@@ -25,6 +25,7 @@
 #include "GeometryUtils.h"
 #include "NeuralNetwork.h"
 #include "DirectoryHelper.h"
+#include <donut/render/LightProbeProcessingPass.h>
 
 #include <iostream>
 #include <fstream>
@@ -44,6 +45,7 @@ struct UIData
     float roughness = 0.4f;
     float metallic = 0.7f;
     float3 lightDir = { -0.761f, -0.467f, -0.450f };
+    bool enableNeuralShading = true;
 };
 
 class SimpleInferencing : public app::IRenderPass
@@ -100,8 +102,9 @@ public:
 
         m_skyboxVertexShader = m_shaderFactory->CreateShader("app/Skybox", "main_vs", nullptr, nvrhi::ShaderType::Vertex);
         m_skyboxPixelShader = m_shaderFactory->CreateShader("app/Skybox", "main_ps", nullptr, nvrhi::ShaderType::Pixel);
+        m_equirectToCubeCS = m_shaderFactory->CreateShader("app/EquirectToCube", "main_cs", nullptr, nvrhi::ShaderType::Compute);
 
-        if (!m_vertexShader || !m_pixelShader || !m_skyboxVertexShader || !m_skyboxPixelShader)
+        if (!m_vertexShader || !m_pixelShader || !m_skyboxVertexShader || !m_skyboxPixelShader || !m_equirectToCubeCS)
         {
             return false;
         }
@@ -112,6 +115,21 @@ public:
 
         m_textureCache = std::make_shared<engine::TextureCache>(GetDevice(), nativeFS, nullptr);
         m_commonPasses = std::make_shared<engine::CommonRenderPasses>(GetDevice(), m_shaderFactory);
+        m_lightProbePass = std::make_shared<donut::render::LightProbeProcessingPass>(GetDevice(), m_shaderFactory, m_commonPasses);
+
+        nvrhi::BindingLayoutDesc blDescCS;
+        blDescCS.visibility = nvrhi::ShaderType::Compute;
+        blDescCS.bindings = {
+            nvrhi::BindingLayoutItem::Texture_SRV(0),
+            nvrhi::BindingLayoutItem::Sampler(0),
+            nvrhi::BindingLayoutItem::Texture_UAV(0)
+        };
+        m_equirectToCubeBindingLayout = GetDevice()->createBindingLayout(blDescCS);
+
+        nvrhi::ComputePipelineDesc cpDesc;
+        cpDesc.CS = m_equirectToCubeCS;
+        cpDesc.bindingLayouts = { m_equirectToCubeBindingLayout };
+        m_equirectToCubePipeline = GetDevice()->createComputePipeline(cpDesc);
 
         LoadSkyboxTexture(GetLocalPath("assets/skybox/kloofendal_43d_clear_1k.exr").string());
 
@@ -229,7 +247,61 @@ public:
         commandList->open();
         
         m_skyboxTexture = m_textureCache->LoadTextureFromFile(path, false, m_commonPasses.get(), commandList);
-        
+
+        if (!m_skyboxTexture || !m_skyboxTexture->texture) {
+            log::warning("Failed to load skybox texture: %s", path.c_str());
+            commandList->close();
+            GetDevice()->executeCommandList(commandList);
+            return;
+        }
+
+        if (!m_skyboxSampler) {
+            nvrhi::SamplerDesc samplerDesc;
+            samplerDesc.setAllAddressModes(nvrhi::SamplerAddressMode::Repeat);
+            samplerDesc.setAllFilters(true);
+            m_skyboxSampler = GetDevice()->createSampler(samplerDesc);
+        }
+
+        uint32_t cubeSize = 1024;
+        nvrhi::TextureDesc cubeDesc;
+        cubeDesc.width = cubeSize;
+        cubeDesc.height = cubeSize;
+        cubeDesc.arraySize = 6;
+        cubeDesc.isRenderTarget = true;
+        cubeDesc.isUAV = true;
+        uint32_t mips = 0;
+        for (uint32_t s = cubeSize; s > 0; s >>= 1) mips++;
+        cubeDesc.mipLevels = mips;
+        cubeDesc.dimension = nvrhi::TextureDimension::TextureCube;
+        cubeDesc.format = m_skyboxTexture->texture->getDesc().format;
+        cubeDesc.debugName = "SkyboxCubemap";
+        cubeDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
+        cubeDesc.keepInitialState = true;
+
+        m_skyboxCubemap = GetDevice()->createTexture(cubeDesc);
+
+        nvrhi::BindingSetDesc bsDesc;
+        bsDesc.bindings = {
+            nvrhi::BindingSetItem::Texture_SRV(0, m_skyboxTexture->texture),
+            nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler),
+            nvrhi::BindingSetItem::Texture_UAV(0, m_skyboxCubemap, nvrhi::Format::UNKNOWN, nvrhi::TextureSubresourceSet(0, 1, 0, 6))
+        };
+        nvrhi::BindingSetHandle bindingSet = GetDevice()->createBindingSet(bsDesc, m_equirectToCubeBindingLayout);
+
+        nvrhi::ComputeState state;
+        state.pipeline = m_equirectToCubePipeline;
+        state.bindings = { bindingSet };
+
+        commandList->setComputeState(state);
+        commandList->dispatch((cubeSize + 7) / 8, (cubeSize + 7) / 8, 6);
+
+        commandList->setTextureState(m_skyboxCubemap, nvrhi::TextureSubresourceSet(0, 1, 0, 6), nvrhi::ResourceStates::CopySource);
+        commandList->commitBarriers();
+
+        m_lightProbePass->GenerateCubemapMips(commandList, m_skyboxCubemap, 0, 0, cubeDesc.mipLevels - 1);
+
+        commandList->setTextureState(m_skyboxCubemap, nvrhi::TextureSubresourceSet(0, cubeDesc.mipLevels, 0, 6), nvrhi::ResourceStates::ShaderResource);
+
         commandList->close();
         GetDevice()->executeCommandList(commandList);
 
@@ -418,11 +490,11 @@ public:
             m_skyboxPipeline = GetDevice()->createGraphicsPipeline(psoDesc, framebuffer->getFramebufferInfo());
         }
 
-        if (!m_skyboxBindingSet && m_skyboxTexture && m_skyboxTexture->texture)
+        if (!m_skyboxBindingSet && m_skyboxCubemap)
         {
             nvrhi::BindingSetDesc setDesc;
             setDesc.bindings = {
-                nvrhi::BindingSetItem::Texture_SRV(0, m_skyboxTexture->texture),
+                nvrhi::BindingSetItem::Texture_SRV(0, m_skyboxCubemap),
                 nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler),
                 nvrhi::BindingSetItem::ConstantBuffer(0, m_constantBuffer)
             };
@@ -430,7 +502,7 @@ public:
 
             nvrhi::BindingSetDesc iblSetDesc;
             iblSetDesc.bindings = {
-                nvrhi::BindingSetItem::Texture_SRV(1, m_skyboxTexture->texture),
+                nvrhi::BindingSetItem::Texture_SRV(1, m_skyboxCubemap),
                 nvrhi::BindingSetItem::Sampler(0, m_skyboxSampler)
             };
             m_iblBindingSet = GetDevice()->createBindingSet(iblSetDesc, m_iblBindingLayout);
@@ -466,7 +538,7 @@ public:
                                        m_userInterfaceParameters->specular,
                                        m_userInterfaceParameters->roughness,
                                        m_userInterfaceParameters->metallic,
-                                       0.f,
+                                       m_userInterfaceParameters->enableNeuralShading ? 1u : 0u,
                                        m_weightOffsets,
                                        m_biasOffsets };
         modelConstant.view = affineToHomogeneous(translation(-camPos) * lookatZ(-camDir, camUp));
@@ -562,9 +634,14 @@ private:
     std::shared_ptr<donut::engine::LoadedTexture> m_skyboxTexture;
     std::string m_skyboxPath;
     nvrhi::SamplerHandle m_skyboxSampler;
+    nvrhi::TextureHandle m_skyboxCubemap;
+    nvrhi::ShaderHandle m_equirectToCubeCS;
+    nvrhi::BindingLayoutHandle m_equirectToCubeBindingLayout;
+    nvrhi::ComputePipelineHandle m_equirectToCubePipeline;
 
     std::shared_ptr<engine::ShaderFactory> m_shaderFactory;
     std::shared_ptr<engine::CommonRenderPasses> m_commonPasses;
+    std::shared_ptr<donut::render::LightProbeProcessingPass> m_lightProbePass;
     std::shared_ptr<vfs::RootFileSystem> m_rootFS;
     std::shared_ptr<rtxns::NetworkUtilities> m_networkUtils;
 
@@ -627,6 +704,7 @@ public:
         ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
         ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.3f, 1.f);
         ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
+        ImGui::Checkbox("Enable Neural Shading", &m_userInterfaceParameters->enableNeuralShading);
 
         ImGui::End();
     }

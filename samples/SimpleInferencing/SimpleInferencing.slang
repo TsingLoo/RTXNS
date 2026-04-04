@@ -18,7 +18,7 @@ import LinearOps;
 DECLARE_CBUFFER(NeuralConstants, gConst, 0, 0);
 ByteAddressBuffer gMLPParams            :REGISTER_SRV(0, 0);
 
-Texture2D<float4> t_Skybox            : REGISTER_SRV(1, 1);
+TextureCube<float4> t_Skybox            : REGISTER_SRV(1, 1);
 SamplerState s_Skybox                 : REGISTER_SAMPLER(0, 1);
 
 struct VertexIn
@@ -42,6 +42,66 @@ void main_vs(
     vOut.pos = mul(float4(vIn.pos, 1), gConst.viewProject);
     vOut.norm = vIn.norm;
     vOut.view = gConst.cameraPos.xyz - vIn.pos;
+}
+
+const static float DISNEY_PI = 3.14159265358979323846;
+
+float SchlickFresnel(float u)
+{
+    float m = clamp(1 - u, 0, 1);
+    float m2 = m * m;
+    return m2 * m2 * m; // pow(m,5)
+}
+
+float Gtr1(float NdotH, float a)
+{
+    if (a >= 1)
+    {
+        return 1 / DISNEY_PI;
+    }
+    float a2 = a * a;
+    float t = 1 + (a2 - 1) * NdotH * NdotH;
+    return (a2 - 1) / (DISNEY_PI * log(a2) * t);
+}
+
+float Gtr2(float NdotH, float ax)
+{
+    float a = ax * (1 / ax / ax * (1 - NdotH * NdotH) + NdotH * NdotH);
+    return 1 / (DISNEY_PI * a * a);
+}
+
+float SmithGGX(float NdotV, float alphaG)
+{
+    float a = alphaG * alphaG;
+    float b = NdotV * NdotV;
+    return 1 / (NdotV + sqrt(a + b - a * b));
+}
+
+float SmithGGXAnisotropy(float NdotV, float ax)
+{
+    return 1 / (NdotV + sqrt(ax * ax * (1 - NdotV * NdotV) + NdotV * NdotV));
+}
+
+float4 Disney(float NdotL, float NdotV, float NdotH, float LdotH, float roughness)
+{
+    float FL = SchlickFresnel(NdotL), FV = SchlickFresnel(NdotV);
+    float Fss90 = LdotH * LdotH * roughness;
+    float Fss = lerp(1.0f, Fss90, FL) * lerp(1.0f, Fss90, FV);
+    float ss = 1.25f * (Fss * (1.f / (NdotL + NdotV) - .5f) + .5f);
+
+    // specular
+    float ax = max(.001f, roughness * roughness);
+    float Ds = Gtr2(NdotH, ax);
+    float FH = SchlickFresnel(LdotH);
+    float Gs = SmithGGXAnisotropy(NdotL, ax);
+    Gs *= SmithGGXAnisotropy(NdotV, ax);
+
+    // clearcoat (ior = 1.5 -> F0 = 0.04)
+    float Dr = Gtr1(NdotH, .01f);
+    float Fr = lerp(.04f, 1.0f, FH);
+    float Gr = SmithGGX(NdotL, .25f) * SmithGGX(NdotV, .25f);
+
+    return float4((1 / DISNEY_PI) * ss, Gs * Ds, FH, .25 * Gr * Fr * Dr);
 }
 
 float4 DisneyMLP(float NdotL, float NdotV, float NdotH, float LdotH, float roughness)
@@ -115,8 +175,16 @@ void main_ps(
     float NdotH = max(0.f, dot(norm, h));
     float LdotH = max(0.f, dot(h, -lightDir.xyz));
 
-    // Calculate approximated core shader part using MLP
-    float4 outParams = DisneyMLP(NdotL, NdotV, NdotH, LdotH, roughness);
+    // Calculate core shader part using MLP or standard analytical model
+    float4 outParams;
+    if (gConst.enableNeuralShading != 0)
+    {
+        outParams = DisneyMLP(NdotL, NdotV, NdotH, LdotH, roughness);
+    }
+    else
+    {
+        outParams = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
+    }
 
     // Calculate final color
     float3 Cdlin = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
@@ -127,17 +195,9 @@ void main_ps(
     // --- Image-Based Lighting Evaluation ---
     float3 R = reflect(-view, norm);
 
-    float2 uv_diffuse;
-    uv_diffuse.x = atan2(norm.z, norm.x) * 0.15915494309 + 0.5;
-    uv_diffuse.y = asin(-norm.y) * 0.31830988618 + 0.5;
-
-    float2 uv_specular;
-    uv_specular.x = atan2(R.z, R.x) * 0.15915494309 + 0.5;
-    uv_specular.y = asin(-R.y) * 0.31830988618 + 0.5;
-
     float max_mip = 10.0; // Rough approximation. Donut TextureCache will generate full mip chain.
-    float3 iblDiffuse = t_Skybox.SampleLevel(s_Skybox, uv_diffuse, max_mip - 2.0).rgb;
-    float3 iblSpecular = t_Skybox.SampleLevel(s_Skybox, uv_specular, roughness * max_mip).rgb;
+    float3 iblDiffuse = t_Skybox.SampleLevel(s_Skybox, norm, max_mip - 2.0).rgb;
+    float3 iblSpecular = t_Skybox.SampleLevel(s_Skybox, R, roughness * max_mip).rgb;
 
     // Analytical EnvBRDF takes the role of the 2D LUT texture lookup
     float3 envSpecular = iblSpecular * EnvBRDFApprox(Cspec0, roughness, NdotV);
