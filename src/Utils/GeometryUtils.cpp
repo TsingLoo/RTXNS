@@ -26,7 +26,7 @@ std::pair<std::vector<Vertex>, std::vector<uint32_t>> GenerateSphere(float radiu
             float theta = uv.x * 2.f * PI_f;
             float phi = uv.y * PI_f;
             float3 dir = float3(std::cos(theta) * std::sin(phi), std::cos(phi), std::sin(theta) * std::sin(phi));
-            vs.push_back({ dir * radius, dir });
+            vs.push_back({ dir * radius, dir, 0 });
         }
     }
 
@@ -163,8 +163,7 @@ bool LoadGLTF(
     const std::string& path, 
     std::vector<Vertex>& outVertices, 
     std::vector<uint32_t>& outIndices, 
-    std::vector<MaterialParams>& outMaterials,
-    std::vector<uint32_t>& outMaterialIndices
+    std::vector<MaterialParams>& outMaterials
 )
 {
     cgltf_options options = {};
@@ -268,8 +267,8 @@ bool LoadGLTF(
                     vert.normal = float3(0,1,0); 
                 }
                 
+                vert.materialIndex = mat_idx;
                 outVertices.push_back(vert);
-                outMaterialIndices.push_back(mat_idx);
             }
             
             if (prim->indices) {

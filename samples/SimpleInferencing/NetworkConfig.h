@@ -42,6 +42,10 @@ struct NeuralConstants
     // Neural weight & bias offsets
     uint4 weightOffsets; // Offsets to weight matrices in bytes.
     uint4 biasOffsets; // Offsets to bias vectors in bytes.
+
+    // Material system
+    uint usePerVertexMaterial;
+    uint _matPad0, _matPad1, _matPad2; // padding to 16-byte boundary
 };
 
 #endif //__NETWORK_CONFIG_H__

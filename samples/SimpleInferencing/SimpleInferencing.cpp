@@ -73,7 +73,7 @@ bool SimpleInferencing::Init()
     if (!m_skyboxRenderer->Init())
         return false;
 
-    LoadSkyboxTexture(GetLocalPath("assets/skybox/kloofendal_43d_clear_1k.exr").string());
+    LoadSkyboxTexture(GetLocalPath("assets/environment_maps/14-Hamarikyu_Bridge_B_3k.hdr").string());
 
     if (!m_modelPath.empty())
     {
@@ -153,9 +153,7 @@ bool SimpleInferencing::LoadModel(const std::string& path)
         loaded = LoadOBJ(path, vertices, indices, mats, matIndices);
     }
     else
-    {
-        loaded = LoadGLTF(path, vertices, indices, mats, matIndices);
-    }
+        loaded = LoadGLTF(path, vertices, indices, mats);
 
     if (!loaded)
     {

@@ -19,6 +19,7 @@ struct Vertex
 {
     dm::float3 position;
     dm::float3 normal;
+    uint32_t materialIndex;
 };
 
 struct MaterialParams
@@ -58,6 +59,5 @@ bool LoadGLTF(
     const std::string& path, 
     std::vector<Vertex>& outVertices, 
     std::vector<uint32_t>& outIndices, 
-    std::vector<MaterialParams>& outMaterials,
-    std::vector<uint32_t>& outMaterialIndices
+    std::vector<MaterialParams>& outMaterials
 );
