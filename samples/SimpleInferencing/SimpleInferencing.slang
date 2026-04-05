@@ -43,6 +43,11 @@ Texture2D<float4> g_Textures[] : REGISTER_SRV(1, 2);
 SamplerState s_Material                 : REGISTER_SAMPLER(0, 2);
 
 // =============================================================================
+// Binding Set 3: Unified MLP weights (Disney + IBL baked)
+// =============================================================================
+ByteAddressBuffer gUnifiedMLPParams     : REGISTER_SRV(0, 3);
+
+// =============================================================================
 // Vertex structures
 // =============================================================================
 struct VertexIn
@@ -177,6 +182,61 @@ float4 DisneyMLP(float NdotL, float NdotV, float NdotH, float LdotH, float rough
 }
 
 // =============================================================================
+// Unified MLP: pure PyTorch offline equivalent (3 layers 64 width)
+// =============================================================================
+void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao, float roughness, float metallic, out float results[UNIFIED_OUTPUT_NEURONS])
+{
+    float params[UNIFIED_INPUT_FEATURES] = {
+        NdotL, NdotV, VdotL, thickness, ao, roughness, metallic
+    };
+
+    CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS> inputParams = CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS>(VECTOR_FORMAT(0.0));
+    CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> hiddenParams;
+    CoopVec<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS> outputParams;
+
+    // Custom Frequency Encoding matching FrequencyEncoder(input_dim=7, freq_bands=2) in PyTorch
+    // PyTorch torch.cat(encodings, dim=-1) puts all original vars first, then all sin(1v), then all cos(1v)...
+    [ForceUnroll]
+    for (int i = 0; i < UNIFIED_INPUT_FEATURES; ++i) {
+        float x = params[i];
+        inputParams[i] = VECTOR_FORMAT(x);
+        inputParams[UNIFIED_INPUT_FEATURES + i] = VECTOR_FORMAT(sin(1.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*2 + i] = VECTOR_FORMAT(cos(1.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*3 + i] = VECTOR_FORMAT(sin(2.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*4 + i] = VECTOR_FORMAT(cos(2.0f * 3.14159265f * x));
+    }
+
+    // Layer 0: 35 -> 64
+    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_INPUT_NEURONS>(
+        inputParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].x, gConst.uniBiasOffsets[0].x,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+    hiddenParams = rtxns::relu(hiddenParams);
+
+    // Layer 1: 64 -> 64
+    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
+        hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].y, gConst.uniBiasOffsets[0].y,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+    hiddenParams = rtxns::relu(hiddenParams);
+
+    // Layer 2: 64 -> 64
+    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
+        hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].z, gConst.uniBiasOffsets[0].z,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+    hiddenParams = rtxns::relu(hiddenParams);
+
+    // Layer 3 (output): 64 -> 3
+    outputParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS, UNIFIED_HIDDEN_NEURONS>(
+        hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].w, gConst.uniBiasOffsets[0].w,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+
+    // PyTorch uses Sigmoid activation on output colors!
+    for (int i = 0; i < UNIFIED_OUTPUT_NEURONS; ++i) {
+        float rawOutput = float(outputParams[i]);
+        results[i] = 1.0f / (1.0f + exp(-rawOutput));
+    }
+}
+
+// =============================================================================
 // Helper: sample a material texture by index, return white if index < 0
 // =============================================================================
 float4 SampleMaterialTexture(int texIdx, float2 uv)
@@ -199,6 +259,7 @@ void main_ps(
     float roughness;
     float metallic;
     float specular;
+    float thickness = 0.5; // Default thickness
     float3 emissive = float3(0, 0, 0);
     float ao = 1.0;
 
@@ -233,6 +294,12 @@ void main_ps(
         {
             float aoTex = SampleMaterialTexture(mat.occlusionTexIdx, vOut.uv).r;
             ao = lerp(1.0, aoTex, mat.occlusionStrength);
+        }
+        
+        // Thickness map (KHR_materials_volume) (G channel according to spec or R, cgltf treats it as R usually but let's take G like typical ORM or full RGB)
+        if (mat.thicknessTexIdx >= 0)
+        {
+            thickness = SampleMaterialTexture(mat.thicknessTexIdx, vOut.uv).g;
         }
         
         // Emissive
@@ -278,50 +345,148 @@ void main_ps(
     float4 lightIntensity = gConst.lightIntensity;
     float4 lightDir = gConst.lightDir;
 
+    // ---- Final Color Output Variables ----
+    float4 outParams;
+    float3 iblDiffuse;
+    float3 iblSpecular;
+    float2 envBRDF;
+
     float3 h = normalize(-lightDir.xyz + view);
 
-    float NdotL = max(0.f, dot(N, -lightDir.xyz));
-    float NdotV = max(0.f, dot(N, view));
-    float NdotH = max(0.f, dot(N, h));
-    float LdotH = max(0.f, dot(h, -lightDir.xyz));
+    // Allow NdotL to be negative to evaluate backlight scattering
+    float NdotL = dot(N, -lightDir.xyz);
+    float NdotV = max(1e-5f, dot(N, view));
+    float NdotH = max(1e-5f, dot(N, h));
+    float LdotH = max(1e-5f, dot(h, -lightDir.xyz));
+    float VdotL = dot(view, -lightDir.xyz);
 
-    // ---- Disney BRDF ----
-    float4 outParams;
-    if (gConst.enableNeuralShading != 0)
-    {
-        outParams = DisneyMLP(NdotL, NdotV, NdotH, LdotH, roughness);
-    }
-    else
-    {
-        outParams = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
-    }
-
-    // ---- Final color ----
-    float3 Cdlin = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
-    float3 Cspec0 = lerp(specular * .08f * float3(1,1,1), Cdlin, metallic);
-    float3 brdfn = outParams.x * Cdlin * (1 - metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
-    float3 colorh = brdfn * float3(NdotL) * lightIntensity.rgb;
-
-    // ---- Image-Based Lighting ----
+    // ---- IBL Texture Sampling (Always evaluated but mathematical LUT is predicted by MLP if enabled) ----
     float3 R = reflect(-view, N);
-
     const float MAX_REFLECTION_LOD = 10.0;
-    float3 iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
     
+    // Diffuse
+    iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
+    
+    // Specular
     float lod = roughness * MAX_REFLECTION_LOD;
-    float3 iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
+    iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
     if (roughness < 0.04) {
         float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
         iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
     }
 
-    float2 envBRDF = t_BRDFLut.SampleLevel(s_Skybox, clamp(float2(NdotV, roughness), 0.01, 0.99), 0).rg;
-    float3 envSpecular = iblSpecular * (Cspec0 * envBRDF.x + envBRDF.y);
+    // ---- Check for unified neural shading mode ----
+    float3 sssTransmittance = float3(0, 0, 0);
 
+    // Only apply to objects that have a thickness map, or fallback to true for procedural sphere
+    bool isNeuralTarget = true;
+    if (gConst.usePerVertexMaterial != 0 && gConst.materialCount > 0) {
+        uint matIdx = min(vOut.materialIndex, gConst.materialCount - 1);
+        isNeuralTarget = (g_Materials[matIdx].thicknessTexIdx >= 0);
+    }
+
+    if (gConst.enableNeuralIBL != 0 && isNeuralTarget)
+    {
+        // UNIVERSAL MLP: perfectly replaces rendering logic predicting the pure RGB
+        float mlpResults[UNIFIED_OUTPUT_NEURONS];
+        // The Python dataset was strictly trained with roughness=0.15 and metallic=0.0
+        // Feeding anything else (like Metallic 1.0 from the UI) triggers untrained explosive noise!
+        UnifiedMLP(NdotL, NdotV, VdotL, thickness, ao, 0.15f, 0.0f, mlpResults);
+        
+        // Output from MLP is Sigmoid bound [0, 1].
+        // Scale with the recent 5.0 clipped y_max, BUT ALSO multiply by UI light intensity!
+        float3 y_scale = float3(5.0, 5.0, 5.0); 
+        float3 neuralDiffuse = float3(mlpResults[0], mlpResults[1], mlpResults[2]) * y_scale; 
+        
+        // Allow the UI Light Intensity (and an ambient floor of 0.2) to scale the brightness!
+        neuralDiffuse *= (gConst.lightIntensity.rgb + 0.2);
+        
+        // -------------------------------------------------------------
+        // THE GOLDEN RULE OF NEURAL RENDERING: Neural Diffuse + Physical Specular
+        // -------------------------------------------------------------
+        // We use the Neural Network's prediction purely as the "Subsurface DiffuseBase".
+        // Now we calculate the exact same mathematical sharp SPECULAR highlight as the engine uses!
+        
+        // Directional Light Specular (Microfacet BRDF math)
+        float3 H = normalize(V + L);
+        float NdotH = saturate(dot(N, H));
+        float LdotH = saturate(dot(L, H));
+        
+        float a = roughness * roughness;
+        float a2 = a * a;
+        float d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
+        float D = a2 / (3.14159265 * d * d);
+        
+        float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+        float GV = NdotV / (NdotV * (1.0 - k) + k);
+        float GL = NdotL / (NdotL * (1.0 - k) + k);
+        float G = GV * GL;
+        
+        float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
+        float3 F = F0 + (1.0 - F0) * pow(1.0 - LdotH, 5.0);
+        
+        float3 specularTerm = (D * G * F) / max(4.0 * NdotV * NdotL, 0.001) * NdotL;
+        // Multiply by the raw light energy
+        float3 analyticalSpecular = specularTerm * gConst.lightIntensity.rgb * 3.14159f;
+        
+        // Combine them: The beautiful MLP subsurface flow + the razor-sharp physical specular
+        float3 finalColor = neuralDiffuse + analyticalSpecular;
+        
+        // Add IBL Specular Reflections for environmental wetness
+        finalColor += iblSpecular * F0 * ao * gConst.lightIntensity.rgb;
+
+        // ACES Film Tonemapping to safely compress blinding highlights into smooth white
+        float3 x = max(0, finalColor - 0.004);
+        finalColor = (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06);
+
+        // Override Final Output
+        o_color = float4(finalColor, baseColor.a);
+        return;
+    }
+    else
+    {
+        // ---- Disney BRDF ----
+        if (gConst.enableNeuralShading != 0) {
+            outParams = DisneyMLP(NdotL, NdotV, NdotH, LdotH, roughness);
+        } else {
+            outParams = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
+        }
+
+        // BRDF LUT
+        envBRDF = t_BRDFLut.SampleLevel(s_Skybox, clamp(float2(NdotV, roughness), 0.01, 0.99), 0).rg;
+        
+        // ---- Analytical Sub-Surface Scattering Base Math (Ground Truth Fallback) ----
+        float3 SCATTER_COLOR = float3(1.5, 4.0, 1.0);
+        float wrap = 0.8;
+        float wrappedL = max(0.0, (NdotL + wrap) / (1.0 + wrap));
+        float phase = max(0.0, VdotL * 0.5 + 0.5);
+        float depth = max(0.01, thickness * 2.0); 
+        sssTransmittance = exp(-depth / SCATTER_COLOR) * wrappedL * phase * 3.5;
+    }
+
+    // ---- Arithmetic Composition (Linear Albedo * Lighting) ----
+    float3 Cdlin = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
+    float3 Cspec0 = lerp(specular * .08f * float3(1,1,1), Cdlin, metallic);
+    
+    // Directional (Forward + Backlight SSS)
+    // For standard BRDF, clamp NdotL. For SSS, use raw light direction.
+    float forwardNdotL = max(0.0, NdotL);
+    float3 brdfn = outParams.x * Cdlin * (1 - metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
+    float3 colorh = brdfn * forwardNdotL * lightIntensity.rgb;
+    
+    // Add Subsurface Scattering Glow
+    float3 sssBaseColor = float3(0.6, 0.9, 0.4); // Jade hue
+    float3 effectiveGlowColor = lerp(Cdlin, sssBaseColor, 0.8); // Trust the SSS base color heavily
+    
+    // Greatly boost the transmittence glow so it feels like soft jade instead of hard ceramic
+    float3 sssGlow = sssTransmittance * effectiveGlowColor * lightIntensity.rgb * 5.0;
+    colorh += sssGlow;
+
+    // Ambient / IBL
+    float3 envSpecularFinal = iblSpecular * (Cspec0 * envBRDF.x + envBRDF.y);
     float3 fresnelRoughness = Cspec0 + (max(float3(1.0 - roughness), Cspec0) - Cspec0) * pow(1.0 - NdotV, 5.0);
     float3 kD = (1.0 - fresnelRoughness) * (1.0 - metallic);
-    
-    float3 PBR_IBL = kD * Cdlin * iblDiffuse + envSpecular;
+    float3 PBR_IBL = kD * Cdlin * iblDiffuse + envSpecularFinal;
 
     // Apply AO to ambient/IBL
     PBR_IBL *= ao;

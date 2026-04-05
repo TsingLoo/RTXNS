@@ -15,6 +15,9 @@ void UserInterface::buildUI()
     ImGui::SetNextWindowPos(ImVec2(10.f, 10.f), 0);
     ImGui::Begin("Settings", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
 
+    ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+    ImGui::Separator();
+
     if (ImGui::Button("Load GLTF Model"))
     {
         std::string fileName;
@@ -39,7 +42,22 @@ void UserInterface::buildUI()
     ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
     ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.0f, 1.f);
     ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
-    ImGui::Checkbox("Enable Neural Shading", &m_userInterfaceParameters->enableNeuralShading);
+    // Legacy Disney shader removed to prevent confusion
+    // ImGui::Checkbox("Enable Neural Shading (Disney)", &m_userInterfaceParameters->enableNeuralShading);
+    
+    ImGui::Separator();
+    ImGui::Text("--- Neural Jade SSS (Offline) ---");
+    
+    ImGui::Checkbox("Enable Neural SSS Render", &m_userInterfaceParameters->enableNeuralIBL);
+
+    if (ImGui::Button("Load SSS Weights (JSON)"))
+    {
+        std::string fileName;
+        if (donut::app::FileDialog(true, "JSON Weights\0*.json\0Binary Weights\0*.ns.bin\0All Files\0*.*\0\0", fileName))
+        {
+            m_app->LoadUnifiedWeights(fileName);
+        }
+    }
 
     ImGui::End();
 }

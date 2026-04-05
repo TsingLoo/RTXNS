@@ -46,7 +46,7 @@ struct MaterialParams
     int emissiveTexIdx;
     int alphaMode;              // 0=opaque, 1=mask, 2=blend
     float alphaCutoff;
-    float _pad0;
+    int thicknessTexIdx;        // KHR_materials_volume
 };
 
 // Raw texture data loaded from GLTF

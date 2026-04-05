@@ -1,5 +1,7 @@
 #pragma once
 
+#include <random>
+
 #include <donut/app/ApplicationBase.h>
 #include <donut/engine/ShaderFactory.h>
 #include <donut/engine/CommonRenderPasses.h>
@@ -32,6 +34,8 @@ public:
     std::shared_ptr<donut::engine::ShaderFactory> GetShaderFactory() const;
     bool LoadModel(const std::string& path);
     void LoadSkyboxTexture(const std::string& path);
+    void SaveUnifiedWeights(const std::string& path);
+    void LoadUnifiedWeights(const std::string& path);
     
     // IRenderPass
     bool KeyboardUpdate(int key, int scancode, int action, int mods) override;
@@ -90,4 +94,50 @@ private:
     uint32_t m_materialCount = 0;
     uint32_t m_textureCount = 0;
     bool m_hasPerVertexMaterials = false;
+
+    // ===== Unified MLP (Disney + IBL baked into one network) =====
+    // Network
+    std::unique_ptr<rtxns::HostNetwork> m_unifiedNetwork;
+    rtxns::NetworkLayout m_unifiedDeviceLayout;
+    donut::math::uint4 m_unifiedWeightOffsets[2]; // UNIFIED_NUM_TRANSITIONS_ALIGN4
+    donut::math::uint4 m_unifiedBiasOffsets[2];
+
+    // GPU buffers
+    nvrhi::BufferHandle m_unifiedMLPHostBuffer;
+    nvrhi::BufferHandle m_unifiedMLPDeviceBuffer;   // fp16 weights (training layout)
+    nvrhi::BufferHandle m_unifiedMLPInferBuffer;     // fp16 weights (inferencing layout)
+    nvrhi::BufferHandle m_unifiedMLPFP32Buffer;      // fp32 shadow copy
+    nvrhi::BufferHandle m_unifiedGradientsBuffer;
+    nvrhi::BufferHandle m_unifiedMoments1;
+    nvrhi::BufferHandle m_unifiedMoments2;
+    nvrhi::BufferHandle m_unifiedLossBuffer;
+    nvrhi::BufferHandle m_unifiedTrainingCB;
+
+    // Training shaders and pipelines
+    nvrhi::ShaderHandle m_unifiedTrainingCS;
+    nvrhi::ShaderHandle m_unifiedOptimizerCS;
+    nvrhi::ComputePipelineHandle m_unifiedTrainingPipeline;
+    nvrhi::ComputePipelineHandle m_unifiedOptimizerPipeline;
+    nvrhi::BindingLayoutHandle m_unifiedTrainingLayout;
+    nvrhi::BindingSetHandle m_unifiedTrainingSet;
+    nvrhi::BindingLayoutHandle m_unifiedOptimizerLayout;
+    nvrhi::BindingSetHandle m_unifiedOptimizerSet;
+
+    // Inference binding for unified weights (Set 3)
+    nvrhi::BindingLayoutHandle m_unifiedInferLayout;
+    nvrhi::BindingSetHandle m_unifiedInferSet;
+
+    // Training state
+    bool m_unifiedTrainingActive = false;
+    uint32_t m_unifiedTrainingStep = 0;
+    uint32_t m_unifiedEpoch = 0;
+    uint32_t m_unifiedTotalParams = 0;
+    bool m_unifiedReady = false;  // weights loaded or trained
+    std::random_device m_rd;
+
+    // Methods
+    void InitUnifiedNetwork();
+    void CreateUnifiedTrainingResources();
+    void TrainUnifiedStep(nvrhi::ICommandList* cmdList);
+    void ConvertUnifiedToInferencing();
 };

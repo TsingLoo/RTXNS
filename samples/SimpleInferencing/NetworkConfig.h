@@ -20,6 +20,24 @@
 #define OUTPUT_NEURONS 4
 #define HIDDEN_NEURONS 32
 
+// --- Universal Math MLP (PyTorch Equivalent) ---
+// Input: NdotL, NdotV, VdotL, thick, ao, roughness, metallic = 7
+#define UNIFIED_INPUT_FEATURES 7
+#define UNIFIED_INPUT_NEURONS 35 // 7 inputs * (1 + 2 freq_bands * 2 (sin/cos)) = 35 encoded features
+#define UNIFIED_OUTPUT_NEURONS 3 // RGB output
+#define UNIFIED_HIDDEN_NEURONS 64
+#define UNIFIED_NUM_HIDDEN_LAYERS 3                        // 4 transitions total (3 hidden layers + 1 output)
+#define UNIFIED_NUM_TRANSITIONS (UNIFIED_NUM_HIDDEN_LAYERS + 1) // 4
+#define UNIFIED_NUM_TRANSITIONS_ALIGN4 ((UNIFIED_NUM_TRANSITIONS + 3) / 4) // 1
+
+// Training constants for unified MLP
+#define UNIFIED_BATCH_SIZE (1 << 16)
+#define UNIFIED_BATCH_COUNT 50
+#define UNIFIED_THREADS_PER_GROUP 64
+#define UNIFIED_THREADS_PER_GROUP_OPT 32
+#define UNIFIED_LEARNING_RATE 0.001f
+#define UNIFIED_LOSS_SCALE 128.0
+
 // Maximum number of material textures supported in the bindless texture array
 #define MAX_MATERIAL_TEXTURES 64
 
@@ -50,7 +68,11 @@ struct NeuralConstants
     uint usePerVertexMaterial;
     uint materialCount;
     uint textureCount;
-    uint _matPad0; // padding to 16-byte boundary
+
+    // Unified neural shading (Disney + IBL baked)
+    uint enableNeuralIBL;
+    uint4 uniWeightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
+    uint4 uniBiasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
 };
 
 // GPU material parameters — must match C++ MaterialParams exactly
@@ -73,7 +95,22 @@ struct GpuMaterialParams
     int emissiveTexIdx;
     int alphaMode;
     float alphaCutoff;
-    float _pad0;
+    int thicknessTexIdx; // Replaced _pad0
+};
+
+// Training constant buffer for unified MLP
+struct UnifiedTrainingConstants
+{
+    uint4 weightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
+    uint4 biasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
+
+    uint32_t maxParamSize;
+    float learningRate;
+    float currentStep;
+    uint32_t batchSize;
+
+    uint64_t seed;
+    uint2 _pad;
 };
 
 #endif //__NETWORK_CONFIG_H__

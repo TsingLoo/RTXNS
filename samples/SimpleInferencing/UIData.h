@@ -9,4 +9,6 @@ struct UIData
     float metallic = 0.7f;
     donut::math::float3 lightDir = { -0.761f, -0.467f, -0.450f };
     bool enableNeuralShading = true;
+    bool enableNeuralIBL = false;  // Use unified MLP instead of cubemap IBL
+    bool trainUnified = false;     // Start/stop unified MLP training
 };

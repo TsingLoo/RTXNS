@@ -112,6 +112,7 @@ bool LoadOBJ(
     p.emissiveTexIdx = -1;
     p.alphaMode = 0;
     p.alphaCutoff = 0.5f;
+    p.thicknessTexIdx = -1;
     outMaterials.push_back(p);
 
     std::string line;
@@ -428,6 +429,12 @@ bool LoadGLTF(
 
         p.emissiveTexIdx = ResolveTextureIndex(mat->emissive_texture, data, imageToTextureIdx);
 
+        if (mat->has_volume) {
+            p.thicknessTexIdx = ResolveTextureIndex(mat->volume.thickness_texture, data, imageToTextureIdx);
+        } else {
+            p.thicknessTexIdx = -1;
+        }
+
         outMaterials.push_back(p);
     }
     
@@ -448,6 +455,7 @@ bool LoadGLTF(
         p.emissiveTexIdx = -1;
         p.alphaMode = 0;
         p.alphaCutoff = 0.5f;
+        p.thicknessTexIdx = -1;
         outMaterials.push_back(p);
     }
     
