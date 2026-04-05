@@ -174,6 +174,15 @@ bool SimpleInferencing::LoadModel(const std::string& path)
     m_modelPath = path;
     UpdateGeometryBuffers(vertices, indices);
     CreateMaterialResources(mats, textures);
+
+    // Log SSS texture status
+    for (size_t i = 0; i < mats.size(); ++i)
+    {
+        const auto& m = mats[i];
+        log::info("Material %zu SSS textures: thickness=%d, ao=%d, curvature=%d",
+            i, m.thicknessTexIdx, m.occlusionTexIdx, m.curvatureTexIdx);
+    }
+
     return true;
 }
 

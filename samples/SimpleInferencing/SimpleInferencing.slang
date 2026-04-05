@@ -149,12 +149,22 @@ float4 Disney(float NdotL, float NdotV, float NdotH, float LdotH, float roughnes
 }
 
 // =============================================================================
-// Unified MLP: pure PyTorch offline equivalent (3 layers 64 width)
+// Unified MLP: Residual SSS network (5 layers: input_proj + 3 blocks + output)
+// Residual skip connections are fused into exported weights (W_eff = W + I),
+// so inference remains a simple sequential feedforward pass.
 // =============================================================================
 void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
 {
+    // Compute 5 SSS-physics-informed features from existing inputs
+    float wrap_lighting = saturate(NdotL * 0.5 + 0.5);
+    float transmission_feat = exp(-thickness * 3.0) * max(-NdotL, 0.0);
+    float forward_scatter = pow(max(VdotL, 0.0), 4.0);
+    float thin_backlight = (1.0 - thickness) * max(-NdotL, 0.0);
+    float fresnel = pow(1.0 - NdotV, 5.0);
+
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, VdotL, thickness, ao, curvature
+        NdotL, NdotV, VdotL, thickness, ao, curvature,
+        wrap_lighting, transmission_feat, forward_scatter, thin_backlight, fresnel
     };
 
     CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS> inputParams;
@@ -166,7 +176,7 @@ void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao
         inputParams[i] = VECTOR_FORMAT(params[i]);
     }
 
-    // Layer 0: 6 -> 256
+    // Layer 0 (input_proj): 11 -> 256
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_INPUT_NEURONS>(
         inputParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].x, gConst.uniBiasOffsets[0].x,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
@@ -174,25 +184,36 @@ void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao
         hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
     }
 
-    // Layer 1: 256 -> 256
+    // Layer 1 (block1 + residual skip): 256 -> 256
+    CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> savedHidden1 = hiddenParams;
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].y, gConst.uniBiasOffsets[0].y,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
     [ForceUnroll] for (int act_i = 0; act_i < UNIFIED_HIDDEN_NEURONS; ++act_i) {
-        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
+        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i])) + savedHidden1[act_i];
     }
 
-    // Layer 2: 256 -> 256
+    // Layer 2 (block2 + residual skip): 256 -> 256
+    CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> savedHidden2 = hiddenParams;
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].z, gConst.uniBiasOffsets[0].z,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
     [ForceUnroll] for (int act_i = 0; act_i < UNIFIED_HIDDEN_NEURONS; ++act_i) {
-        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
+        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i])) + savedHidden2[act_i];
     }
 
-    // Layer 3 (output): 64 -> 3
-    outputParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS, UNIFIED_HIDDEN_NEURONS>(
+    // Layer 3 (block3 + residual skip): 256 -> 256
+    CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> savedHidden3 = hiddenParams;
+    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].w, gConst.uniBiasOffsets[0].w,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+    [ForceUnroll] for (int act_i = 0; act_i < UNIFIED_HIDDEN_NEURONS; ++act_i) {
+        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i])) + savedHidden3[act_i];
+    }
+
+    // Layer 4 (output): 256 -> 3
+    outputParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS, UNIFIED_HIDDEN_NEURONS>(
+        hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[1].x, gConst.uniBiasOffsets[1].x,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
 
     // The model outputs raw unbounded HDR predictions. We only prevent negative values.
@@ -263,10 +284,10 @@ void main_ps(
             ao = lerp(1.0, aoTex, mat.occlusionStrength);
         }
         
-        // Thickness map (KHR_materials_volume) (G channel according to spec or R, cgltf treats it as R usually but let's take G like typical ORM or full RGB)
+        // Thickness map (standalone PNG: grayscale in R channel)
         if (mat.thicknessTexIdx >= 0)
         {
-            thickness = SampleMaterialTexture(mat.thicknessTexIdx, vOut.uv).g;
+            thickness = SampleMaterialTexture(mat.thicknessTexIdx, vOut.uv).r;
         }
 
         // Curvature map (hijacked from clearcoat)

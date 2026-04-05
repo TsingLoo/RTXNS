@@ -432,12 +432,16 @@ bool LoadGLTF(
 
         if (mat->has_volume) {
             p.thicknessTexIdx = ResolveTextureIndex(mat->volume.thickness_texture, data, imageToTextureIdx);
+            if (p.thicknessTexIdx >= 0)
+                printf("GLTF material %zu: thickness texture loaded via KHR_materials_volume (idx=%d)\n", i, p.thicknessTexIdx);
         } else {
             p.thicknessTexIdx = -1;
         }
 
         if (mat->has_clearcoat) {
             p.curvatureTexIdx = ResolveTextureIndex(mat->clearcoat.clearcoat_texture, data, imageToTextureIdx);
+            if (p.curvatureTexIdx >= 0)
+                printf("GLTF material %zu: curvature texture loaded via KHR_materials_clearcoat (idx=%d)\n", i, p.curvatureTexIdx);
         } else {
             p.curvatureTexIdx = -1;
         }
@@ -465,6 +469,42 @@ bool LoadGLTF(
         p.thicknessTexIdx = -1;
         p.curvatureTexIdx = -1;
         outMaterials.push_back(p);
+    }
+
+    // ---- Fallback: load SSS companion textures from same directory ----
+    // If the GLB didn't contain thickness/AO/curvature via extensions,
+    // try loading them as standalone PNGs next to the GLB file.
+    auto tryLoadFallbackTexture = [&](const std::string& filename) -> int {
+        std::string texPath = gltfDir + "/" + filename;
+        if (!std::filesystem::exists(texPath)) return -1;
+        
+        int w, h, ch;
+        unsigned char* pixels = stbi_load(texPath.c_str(), &w, &h, &ch, 4);
+        if (!pixels) return -1;
+        
+        GltfTextureData tex;
+        tex.width = w;
+        tex.height = h;
+        tex.channels = 4;
+        tex.pixels.resize(w * h * 4);
+        memcpy(tex.pixels.data(), pixels, w * h * 4);
+        tex.name = filename;
+        stbi_image_free(pixels);
+        
+        int idx = (int)outTextures.size();
+        outTextures.push_back(std::move(tex));
+        printf("Loaded fallback SSS texture: %s (%dx%d)\n", texPath.c_str(), w, h);
+        return idx;
+    };
+
+    for (auto& mat : outMaterials)
+    {
+        if (mat.thicknessTexIdx < 0)
+            mat.thicknessTexIdx = tryLoadFallbackTexture("thickness_tex.png");
+        if (mat.occlusionTexIdx < 0)
+            mat.occlusionTexIdx = tryLoadFallbackTexture("ao_tex.png");
+        if (mat.curvatureTexIdx < 0)
+            mat.curvatureTexIdx = tryLoadFallbackTexture("curvature_tex.png");
     }
     
     // ---- Load geometry ----

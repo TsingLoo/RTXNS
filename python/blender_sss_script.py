@@ -111,6 +111,10 @@ render_res = 512
 n_light_angles = 60
 cycles_samples = 512
 
+bbox_corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
+center = sum(bbox_corners, Vector()) / 8
+size = max((max(c[i] for c in bbox_corners) - min(c[i] for c in bbox_corners)) for i in range(3))
+
 links = mat.node_tree.links
 nodes.clear()
 bsdf = nodes.new('ShaderNodeBsdfPrincipled')
@@ -120,7 +124,7 @@ links.new(bsdf.outputs['BSDF'], output.inputs['Surface'])
 bsdf.inputs['Base Color'].default_value = (0.28, 0.58, 0.22, 1.0)
 bsdf.inputs['IOR'].default_value = 1.62
 bsdf.inputs['Subsurface Weight'].default_value = 1.0
-bsdf.inputs['Subsurface Scale'].default_value = 0.8
+bsdf.inputs['Subsurface Scale'].default_value = size * 0.15
 bsdf.inputs['Subsurface Radius'].default_value = (0.8, 1.2, 0.5)
 
 # 🛑 最核心改动：物理级阉割所有高光，只让它渲染通透的 SSS 漫反射底盘
@@ -149,17 +153,12 @@ if not cam:
     scene.collection.objects.link(cam)
 scene.camera = cam
 
-bbox_corners = [obj.matrix_world @ Vector(c) for c in obj.bound_box]
-center = sum(bbox_corners, Vector()) / 8
-size = max((max(c[i] for c in bbox_corners) - min(c[i] for c in bbox_corners)) for i in range(3))
-
 cam_dist = size * 2.5
 cam.location = center + Vector((0, -cam_dist, cam_dist * 0.5))
 direction = center - cam.location
 cam.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
 
 np.save(os.path.join(output_dir, 'camera_pos.npy'), np.array(cam.location, dtype=np.float32))
-
 
 # ============================================
 # 4. 循环打光渲染 (漫反射图)
@@ -171,8 +170,8 @@ if not light:
     scene.collection.objects.link(light)
 
 light.data.type = 'POINT'
-light.data.energy = 1000 * (size ** 2)
-# 彻底关闭阴影投射，确保渲染出的只包含纯粹的SSS散射数据
+light.data.energy = 5000 * (size ** 2)
+# 完全关闭阴影！以保证只提取纯粹由厚度主导的局部 SSS 衰减，避免全局自遮挡产生的不可学习黑斑！
 light.data.use_shadow = False
 light_radius = size * 3
 
@@ -193,7 +192,6 @@ for idx, ld in enumerate(light_dirs):
     scene.render.filepath = os.path.join(output_dir, f'render_{idx:04d}.exr')
     bpy.ops.render.render(write_still=True)
     np.save(os.path.join(output_dir, f'lightdir_{idx:04d}.npy'), np.array(ld, dtype=np.float32))
-
 
 # ============================================
 # 5. 输出附带的 Position Map (平滑)
@@ -256,5 +254,217 @@ if 'Pointiness' in geom_node.outputs:
     scene.render.filepath = os.path.join(output_dir, 'curvature_map.exr')
     bpy.ops.render.render(write_still=True)
     print("Curvature/Pointiness Map 烘焙完成！")
+
+
+# ============================================
+# 6. 烘焙 UV 空间贴图并导出含 SSS 属性的 GLB
+# ============================================
+print("--- 6. 烘焙 UV 空间贴图并导出 GLB ---")
+
+bake_res = 1024
+scene.render.engine = 'CYCLES'
+scene.cycles.samples = 64
+
+# --- 6a. 烘焙 Thickness 贴图 (从顶点色到 UV 空间) ---
+print("烘焙 Thickness 纹理...")
+thick_img = bpy.data.images.new("ThicknessBake", bake_res, bake_res, alpha=False)
+thick_img.colorspace_settings.name = 'Non-Color'
+
+# 设置材质节点：从顶点色 Thickness 读取 -> Emit -> 烘焙
+nodes.clear()
+vc_node = nodes.new('ShaderNodeVertexColor')
+vc_node.layer_name = "Thickness"
+emit_bake = nodes.new('ShaderNodeEmission')
+out_bake = nodes.new('ShaderNodeOutputMaterial')
+tex_target = nodes.new('ShaderNodeTexImage')
+tex_target.name = "BakeTarget"
+tex_target.image = thick_img
+tex_target.select = True
+nodes.active = tex_target
+
+links.new(vc_node.outputs['Color'], emit_bake.inputs['Color'])
+emit_bake.inputs['Strength'].default_value = 1.0
+links.new(emit_bake.outputs['Emission'], out_bake.inputs['Surface'])
+
+bpy.context.scene.cycles.bake_type = 'EMIT'
+bpy.ops.object.bake(type='EMIT')
+thick_img.filepath_raw = os.path.join(output_dir, 'thickness_tex.png')
+thick_img.file_format = 'PNG'
+thick_img.save()
+print("Thickness 纹理烘焙完成！")
+
+# --- 6b. 烘焙 AO 贴图 (已在前面完成, 但需要转为 PNG) ---
+print("烘焙 AO 纹理...")
+ao_bake_img = bpy.data.images.new("AO_Bake", bake_res, bake_res, alpha=False)
+ao_bake_img.colorspace_settings.name = 'Non-Color'
+
+tex_target.image = ao_bake_img
+tex_target.select = True
+nodes.active = tex_target
+
+bpy.context.scene.cycles.bake_type = 'AO'
+bpy.ops.object.bake(type='AO')
+ao_bake_img.filepath_raw = os.path.join(output_dir, 'ao_tex.png')
+ao_bake_img.file_format = 'PNG'
+ao_bake_img.save()
+print("AO 纹理烘焙完成！")
+
+# --- 6c. 烘焙 Curvature/Pointiness 贴图 ---
+print("烘焙 Curvature 纹理...")
+curv_img = bpy.data.images.new("CurvatureBake", bake_res, bake_res, alpha=False)
+curv_img.colorspace_settings.name = 'Non-Color'
+
+nodes.clear()
+geom_bake = nodes.new('ShaderNodeNewGeometry')
+emit_bake2 = nodes.new('ShaderNodeEmission')
+out_bake2 = nodes.new('ShaderNodeOutputMaterial')
+tex_target2 = nodes.new('ShaderNodeTexImage')
+tex_target2.name = "BakeTarget"
+tex_target2.image = curv_img
+tex_target2.select = True
+nodes.active = tex_target2
+
+if 'Pointiness' in geom_bake.outputs:
+    links.new(geom_bake.outputs['Pointiness'], emit_bake2.inputs['Color'])
+else:
+    emit_bake2.inputs['Color'].default_value = (0, 0, 0, 1)
+emit_bake2.inputs['Strength'].default_value = 1.0
+links.new(emit_bake2.outputs['Emission'], out_bake2.inputs['Surface'])
+
+bpy.context.scene.cycles.bake_type = 'EMIT'
+bpy.ops.object.bake(type='EMIT')
+curv_img.filepath_raw = os.path.join(output_dir, 'curvature_tex.png')
+curv_img.file_format = 'PNG'
+curv_img.save()
+print("Curvature 纹理烘焙完成！")
+
+
+# --- 6d. 组装最终材质并导出 GLB ---
+print("组装 glTF 材质...")
+nodes.clear()
+bsdf_final = nodes.new('ShaderNodeBsdfPrincipled')
+out_final = nodes.new('ShaderNodeOutputMaterial')
+links.new(bsdf_final.outputs['BSDF'], out_final.inputs['Surface'])
+
+# 设置 base color = 翡翠绿
+bsdf_final.inputs['Base Color'].default_value = (0.28, 0.58, 0.22, 1.0)
+bsdf_final.inputs['Roughness'].default_value = 0.4
+bsdf_final.inputs['Metallic'].default_value = 0.0
+bsdf_final.inputs['IOR'].default_value = 1.62
+
+# -- Subsurface / Volume (KHR_materials_volume) -> thickness_texture --
+# Blender 4.x 材质节点中 Principled 的 Subsurface 部分
+# C++ loader 读取 KHR_materials_volume.thickness_texture
+bsdf_final.inputs['Subsurface Weight'].default_value = 1.0
+bsdf_final.inputs['Subsurface Scale'].default_value = size * 0.15
+bsdf_final.inputs['Subsurface Radius'].default_value = (0.8, 1.2, 0.5)
+
+# 添加 Thickness 贴图节点 -> Transmission Weight（Blender 会导出为 KHR_materials_volume）
+thick_tex_node = nodes.new('ShaderNodeTexImage')
+thick_tex_node.image = thick_img
+thick_tex_node.label = "ThicknessMap"
+
+# Blender 导出器 KHR_materials_volume: 读取 Principled BSDF 的 Transmission Weight texture
+# 但更可靠的方式是使用 "Thin Film" 或直接用自定义属性
+# 我们用最简单的挂载法: 连接到一个 Group Output
+# Blender 对 KHR_materials_volume 有自动导出 IF Subsurface + Transmission together
+
+# 策略: Blender 不直接导出 thickness_texture -> 我们把所有贴图嵌入 GLB 然后
+# 在 C++ 端使用约定的命名或 slot 来识别   
+# 最简单方法: 把 thickness 放在 occlusionTexture 的 G 通道
+
+# ---- 使用 ORM 打包策略 (Occlusion=R, Roughness=G, Metallic=B) ----
+# 但我们需要单独的 AO channel 和单独的 thickness channel
+# Blender glTF 导出器支持的映射:
+#   - baseColor -> baseColorTexture
+#   - normal -> normalTexture  
+#   - occlusion -> occlusionTexture (R channel)
+#   - metallicRoughness -> metallicRoughnessTexture (G=roughness, B=metallic)
+#   - KHR_materials_volume: thickness_texture (G channel)
+#   - KHR_materials_clearcoat: clearcoat_texture -> 我们用来存 curvature
+
+# 连接 AO 贴图到 BSDF (让 glTF 导出器识别并创建 occlusionTexture)
+# 但 Blender 没有直接的 AO 输入...
+
+# ========== 更实际的策略 ==========
+# Blender 的 glTF 导出器对自定义扩展支持有限
+# 最简单方案: 手动把贴图嵌入 GLB extras 或用约定文件名方式
+# 但这不方便。让我换个策略:
+
+# 直接导出 GLB + 单独的贴图文件，C++ 端手动加载
+print("导出 GLB 模型...")
+
+# 恢复一个干净的 Principled BSDF 材质用于导出
+nodes.clear()
+bsdf_export = nodes.new('ShaderNodeBsdfPrincipled')
+out_export = nodes.new('ShaderNodeOutputMaterial')
+links.new(bsdf_export.outputs['BSDF'], out_export.inputs['Surface'])
+
+bsdf_export.inputs['Base Color'].default_value = (0.28, 0.58, 0.22, 1.0)
+bsdf_export.inputs['Roughness'].default_value = 0.4
+bsdf_export.inputs['Metallic'].default_value = 0.0
+bsdf_export.inputs['IOR'].default_value = 1.62
+
+# 连接 thickness 到 Transmission Weight (triggers KHR_materials_volume export)
+bsdf_export.inputs['Subsurface Weight'].default_value = 1.0
+if 'Transmission Weight' in bsdf_export.inputs:
+    bsdf_export.inputs['Transmission Weight'].default_value = 0.5
+    links.new(thick_tex_node.outputs['Color'], bsdf_export.inputs['Transmission Weight'])
+
+# 添加 AO 纹理节点, 但它需要通过 Group trick
+# Blender glTF 支持: 把 AO 连接到一个 mix shader 或直接到 Alpha
+# 最简单: 通过 glTF Settings node group
+
+# 尝试使用 glTF Material Output node (如果存在)
+# Blender 3.x/4.x 有一个隐藏的 glTF Settings node group
+gltf_group = None
+for ng in bpy.data.node_groups:
+    if ng.name == 'glTF Material Output' or ng.name == 'glTF Settings':
+        gltf_group = ng
+        break
+
+if not gltf_group:
+    # 创建 glTF Material Output group (这是 Blender glTF 导出器的约定)
+    gltf_group = bpy.data.node_groups.new('glTF Material Output', 'ShaderNodeTree')
+    gltf_group.interface.new_socket('Occlusion', in_out='INPUT', socket_type='NodeSocketFloat')
+    
+gltf_settings = nodes.new('ShaderNodeGroup')
+gltf_settings.node_tree = gltf_group
+
+# AO 纹理
+ao_tex_node = nodes.new('ShaderNodeTexImage')
+ao_tex_node.image = ao_bake_img
+ao_tex_node.label = "AO_Map"
+
+# 连接 AO -> glTF Material Output 的 Occlusion
+if 'Occlusion' in gltf_settings.inputs:
+    sep_rgb = nodes.new('ShaderNodeSeparateColor')
+    links.new(ao_tex_node.outputs['Color'], sep_rgb.inputs['Color'])
+    links.new(sep_rgb.outputs['Red'], gltf_settings.inputs['Occlusion'])
+
+# Curvature -> 连接到 Clearcoat (会被导出为 KHR_materials_clearcoat)
+curv_tex_node = nodes.new('ShaderNodeTexImage')
+curv_tex_node.image = curv_img
+curv_tex_node.label = "CurvatureMap"
+
+if 'Coat Weight' in bsdf_export.inputs:
+    links.new(curv_tex_node.outputs['Color'], bsdf_export.inputs['Coat Weight'])
+elif 'Clearcoat' in bsdf_export.inputs:
+    links.new(curv_tex_node.outputs['Color'], bsdf_export.inputs['Clearcoat'])
+
+# 导出为 GLB
+glb_path = os.path.join(output_dir, 'dragon_sss.glb')
+bpy.ops.export_scene.gltf(
+    filepath=glb_path,
+    export_format='GLB',
+    export_image_format='AUTO',
+    export_materials='EXPORT',
+    export_texcoords=True,
+    export_normals=True,
+    export_tangents=True,
+    use_selection=True,
+    export_apply=True,
+)
+print(f"GLB 导出完成: {glb_path}")
 
 print("========== 全部生成任务圆满完成 ==========")

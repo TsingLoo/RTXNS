@@ -21,14 +21,14 @@
 #define HIDDEN_NEURONS 32
 
 // --- Universal Math MLP (PyTorch Equivalent) ---
-// Input: NdotL, NdotV, VdotL, thick, ao, curvature = 6
-#define UNIFIED_INPUT_FEATURES 6
-#define UNIFIED_INPUT_NEURONS 6 // Removed frequency encoding to prevent angular high-frequency aliasing
+// Input: NdotL, NdotV, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel = 11
+#define UNIFIED_INPUT_FEATURES 11
+#define UNIFIED_INPUT_NEURONS 11
 #define UNIFIED_OUTPUT_NEURONS 3 // RGB output
 #define UNIFIED_HIDDEN_NEURONS 256
-#define UNIFIED_NUM_HIDDEN_LAYERS 3                        // 4 transitions total (3 hidden layers + 1 output)
-#define UNIFIED_NUM_TRANSITIONS (UNIFIED_NUM_HIDDEN_LAYERS + 1) // 4
-#define UNIFIED_NUM_TRANSITIONS_ALIGN4 ((UNIFIED_NUM_TRANSITIONS + 3) / 4) // 1
+#define UNIFIED_NUM_HIDDEN_LAYERS 4                        // 5 transitions total (input_proj + 3 residual blocks + output)
+#define UNIFIED_NUM_TRANSITIONS (UNIFIED_NUM_HIDDEN_LAYERS + 1) // 5
+#define UNIFIED_NUM_TRANSITIONS_ALIGN4 ((UNIFIED_NUM_TRANSITIONS + 3) / 4) // 2
 
 // Training constants for unified MLP
 #define UNIFIED_BATCH_SIZE (1 << 16)

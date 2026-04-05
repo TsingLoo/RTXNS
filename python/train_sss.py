@@ -9,24 +9,27 @@ import cv2
 import matplotlib.pyplot as plt
 
 # =========================================
-# 1. 网络结构（针对纯 Diffuse SSS 优化的配置）
+# 1. 网络结构（残差 + SSS 特征）
 # =========================================
+INPUT_DIM = 11  # NdotL, NdotV, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+
 class NeuralSSS(nn.Module):
     def __init__(self):
         super().__init__()
-        width = 256  # increased capacity
-        self.layers = nn.Sequential(
-            nn.Linear(6, width), # Raw 6 angular/geometric inputs
-            nn.Softplus(),
-            nn.Linear(width, width),
-            nn.Softplus(),
-            nn.Linear(width, width),
-            nn.Softplus(),
-            nn.Linear(width, 3),
-        )
+        width = 256
+        self.input_proj = nn.Linear(INPUT_DIM, width)
+        self.act = nn.Softplus()
+        self.block1 = nn.Sequential(nn.Linear(width, width), nn.Softplus())
+        self.block2 = nn.Sequential(nn.Linear(width, width), nn.Softplus())
+        self.block3 = nn.Sequential(nn.Linear(width, width), nn.Softplus())
+        self.output = nn.Linear(width, 3)
 
     def forward(self, x):
-        return self.layers(x)  # Raw output; max pool at inference to avoid negative values
+        h = self.act(self.input_proj(x))
+        h = self.block1(h) + h  # residual skip
+        h = self.block2(h) + h  # residual skip
+        h = self.block3(h) + h  # residual skip
+        return self.output(h)
 
 
 # =========================================
@@ -112,8 +115,16 @@ for idx in range(n_renders):
     NdotV = np.maximum(np.sum(norm * V, axis=-1), 0.0)
     VdotL = np.sum(V * L, axis=-1)
     
+    # ======== SSS 专属特征 ========
+    wrap_lighting = np.clip(NdotL * 0.5 + 0.5, 0.0, 1.0)
+    transmission = np.exp(-thick * 3.0) * np.maximum(-NdotL, 0.0)
+    forward_scatter = np.power(np.maximum(VdotL, 0.0), 4.0)
+    thin_backlight = (1.0 - thick) * np.maximum(-NdotL, 0.0)
+    fresnel = np.power(1.0 - NdotV, 5.0)  # Schlick 菲涅尔，编码润泽边缘光
+    
     inputs_batch = np.stack([
-        NdotL, NdotV, VdotL, thick, ao, curv
+        NdotL, NdotV, VdotL, thick, ao, curv,
+        wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel
     ], axis=-1)
     
     all_inputs.append(inputs_batch)
@@ -124,10 +135,11 @@ X = np.concatenate(all_inputs, axis=0).astype(np.float32)
 Y = np.concatenate(all_targets, axis=0).astype(np.float32)
 print(f"总计提取 {len(X)} 个有效黄金训练像素。")
 
-# 颜色解耦 (Demodulation): 将绝对渲染 RGB 转换为相对的透射率 Transmittance
-# 这样神经网络只学习光分布，不死记硬背物体本身的颜色！
+# 颜色解耦: 网络学习 transmittance = RGB / base_color
+# 这样换色时只需替换 base_color，不用重新训练
+# SSS 的波长差异 (R/G/B 散射半径不同) 在 transmittance 中自然保留
 base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
-Y_norm = Y / (base_color + 1e-6) # 我们不再做任何压缩！直接让网络爆破学习纯正无限 HDR！
+Y_norm = Y / (base_color + 1e-6)
 
 # 90/10 划分 train/val
 n = len(X)
@@ -150,110 +162,111 @@ val_loader = DataLoader(
 print(f"训练集: {len(X_train)} 样本, 验证集: {len(X_val)} 样本")
 
 # =========================================
-# 2.5 准备无阻塞实时预览 (提取一张视角作为监视器)
+# 2.5 启动独立预览进程
 # =========================================
-print("准备实时预览窗口...")
-def load_exr_channels(filepath):
-    img = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
-    return img[:, :, [2, 1, 0, 3]] if img.shape[2] == 4 else img[:, :, [2, 1, 0]]
+import subprocess
+import atexit
 
-def safe_load_exr(file_base):
-    path = os.path.join(data_dir, f'{file_base}_0000.exr')
-    if not os.path.exists(path): path = os.path.join(data_dir, f'{file_base}.exr')
-    return load_exr_channels(path)
-
+print("启动独立实时预览进程 (evaluate_render.py)...")
 try:
-    test_rgba = load_exr_channels(os.path.join(data_dir, 'render_0000.exr'))
-    test_light = np.load(os.path.join(data_dir, 'lightdir_0000.npy'))
-    test_L = test_light / (np.linalg.norm(test_light) + 1e-8)
+    preview_proc = subprocess.Popen(["python", "evaluate_render.py"])
     
-    pos_raw = safe_load_exr('position_map')[:,:,:3]
-    norm_raw = safe_load_exr('normal_map')[:,:,:3]
-    
-    center = np.load(os.path.join(data_dir, 'bbox_center.npy'))
-    size = np.load(os.path.join(data_dir, 'bbox_size.npy'))[0]
-    pos_map = (pos_raw - 0.5) * size + center
-    norm_map = (norm_raw - 0.5) * 2.0
-    thick_map = safe_load_exr('thickness_map')
-    thick_map = thick_map[:,:,0] if thick_map.ndim == 3 else thick_map
-    ao_map = safe_load_exr('ao_map')
-    ao_map = ao_map[:,:,0] if ao_map.ndim == 3 else ao_map
-    curv_map = safe_load_exr('curvature_map')
-    curv_map = curv_map[:,:,0] if curv_map.ndim == 3 else curv_map
-    
-    cam_file = os.path.join(data_dir, 'camera_pos.npy')
-    test_cam = np.load(cam_file) if os.path.exists(cam_file) else np.array([0.0, -5.0, 1.0])
-    
-    test_h, test_w = test_rgba.shape[:2]
-    preview_pixels = []
-    preview_features = []
-    test_gt_img = np.zeros((test_h, test_w, 3), dtype=np.float32)
-    
-    for y in range(test_h):
-        for x in range(test_w):
-            test_gt_img[y, x] = test_rgba[y, x, :3]
-            if test_rgba[y, x, 3] < 0.5: continue
-            
-            V = test_cam - pos_map[y, x]
-            V_len = np.linalg.norm(V)
-            if V_len < 1e-8: continue
-            V = V / V_len
-            
-            n = norm_map[y, x]
-            n_len = np.linalg.norm(n)
-            if n_len < 1e-8: continue
-            n = n / n_len
-            
-            preview_features.append([
-                np.dot(n, test_L), max(np.dot(n, V), 0.0), np.dot(V, test_L),
-                thick_map[y, x], ao_map[y, x], curv_map[y, x]
-            ])
-            preview_pixels.append((y, x))
-            
-    test_X_tensor = torch.tensor(preview_features, dtype=torch.float32).cuda()
-    
-    def simple_aces(x):
-        x = np.maximum(0, x - 0.004)
-        return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06)
-
-    plt.ion() # 开启无阻塞模式
-    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
-    fig.canvas.manager.set_window_title('Live Training Preview')
-    im_pred = axes[0].imshow(np.zeros((test_h, test_w, 3)))
-    axes[0].set_title("MLP Epoch 0")
-    axes[0].axis("off")
-    axes[1].imshow(np.clip(simple_aces(test_gt_img), 0, 1))
-    axes[1].set_title("Blender Ground Truth")
-    axes[1].axis("off")
-    plt.tight_layout()
-    plt.show(block=False)
-    plt.pause(0.1)
-
+    # 确保主进程退出时连带杀掉预览子进程
+    @atexit.register
+    def kill_preview():
+        if preview_proc.poll() is None:
+            preview_proc.terminate()
 except Exception as e:
-    print("预览初始化失败，跳过预览:", e)
-    test_X_tensor = None
+    print(f"警告：无法启动 evaluate_render.py 子进程: {e}")
+
+# =========================================
+# SSS-Aware Loss: 同时兼顾暗部精度和亮部通透感
+# =========================================
+# Blender SSS Radius (0.8, 1.2, 0.5) → 通道重要性权重
+sss_radius = torch.tensor([0.8, 1.2, 0.5], device='cuda', dtype=torch.float32)
+sss_channel_weight = sss_radius / sss_radius.max()  # [0.667, 1.0, 0.417]
+
+def sss_aware_loss(pred, target):
+    diff = pred - target
+    
+    # 1. L1: 线性空间，不做任何压缩，保留完整动态范围
+    l1 = torch.mean(torch.abs(diff) * sss_channel_weight)
+    
+    # 2. MSE: 平方误差对大偏差（暗部偏亮 + 亮部偏暗）施加更强惩罚
+    mse = torch.mean(diff ** 2 * sss_channel_weight)
+    
+    # 3. 对比度项：显式惩罚"该暗不暗"和"该亮不亮"
+    #    暗部 (target < 0.02): pred 偏高时额外惩罚 (raw RGB scale)
+    dark_penalty = torch.mean(torch.clamp(pred - 0.02, min=0.0) * (target < 0.02).float())
+    #    亮部通透区 (target > 0.3): pred 偏低时额外惩罚  
+    bright_penalty = torch.mean(torch.clamp(0.2 - pred, min=0.0) * (target > 0.3).float())
+    
+    return l1 + mse + 0.5 * (dark_penalty + bright_penalty)
 
 
-def log_mse_loss(pred, target):
-    # 使用 L1-Relative Loss (近似 MAPE) 替代直接的 Log MSE
-    # 这能完美解决 pred 为负数时的 NaN 导致网络崩溃的问题，
-    # 同时保留对暗部的强力惩罚（当 target 很小时，分母很小，Loss 放大倍数极高）
-    weight = 1.0 / (target + 0.05)
-    return torch.mean(torch.abs(pred - target) * weight)
+import json
+def export_model_json(model, path):
+    """Export residual network to flat sequential format for C++ inference.
+    
+    The residual connections (h = block(h) + h) are mathematically equivalent to:
+    - Adding an identity matrix to the weight matrix
+    - Passing through the bias unchanged
+    So we export the "effective" weights = W + I for hidden-to-hidden layers.
+    """
+    sd = model.state_dict()
+    out_data = {"layers": [], "input_dim": INPUT_DIM, "freq_bands": 0}
+    
+    # Layer 0: input_proj (INPUT_DIM → 256)
+    w0 = sd["input_proj.weight"].cpu().numpy()
+    b0 = sd["input_proj.bias"].cpu().numpy()
+    out_data["layers"].append({
+        "num_inputs": w0.shape[1],
+        "num_outputs": w0.shape[0],
+        "weights": w0.flatten().tolist(),
+        "biases": b0.flatten().tolist(),
+    })
+    
+    # Layers 1-3: residual blocks → export RAW weights (不融合！)
+    # 残差跳连必须在 shader 中显式实现：h = softplus(W*h + b) + h_saved
+    # 因为 softplus(W*h + b) + h ≠ softplus((W+I)*h + b)  ← 非线性不可交换
+    for block_idx in range(1, 4):
+        w = sd[f"block{block_idx}.0.weight"].cpu().numpy()
+        b = sd[f"block{block_idx}.0.bias"].cpu().numpy()
+        out_data["layers"].append({
+            "num_inputs": w.shape[1],
+            "num_outputs": w.shape[0],
+            "weights": w.flatten().tolist(),
+            "biases": b.flatten().tolist(),
+        })
+    
+    # Layer 4: output (256 → 3)
+    w_out = sd["output.weight"].cpu().numpy()
+    b_out = sd["output.bias"].cpu().numpy()
+    out_data["layers"].append({
+        "num_inputs": w_out.shape[1],
+        "num_outputs": w_out.shape[0],
+        "weights": w_out.flatten().tolist(),
+        "biases": b_out.flatten().tolist(),
+    })
+    
+    out_data["y_scale"] = [1.0, 1.0, 1.0]
+    out_data["base_color"] = base_color.tolist()
+    with open(path, "w") as f:
+        json.dump(out_data, f)
 
 # =========================================
 # 3. 训练
 # =========================================
 model = NeuralSSS().cuda()
-epochs = 200
+epochs = 300
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=epochs, eta_min=1e-6
 )
-loss_fn = log_mse_loss
+loss_fn = sss_aware_loss
 
 best_val_loss = float("inf")
-patience = 25
+patience = 40
 no_improve_count = 0
 
 print("开始训练...")
@@ -275,7 +288,7 @@ for epoch in range(epochs):
         train_loss_sum += loss.item() * len(bx)
         train_count += len(bx)
 
-    # ---- ----
+    # ---- Val ----
     model.eval()
     val_loss_sum = 0.0
     val_count = 0
@@ -298,29 +311,13 @@ for epoch in range(epochs):
         f"Train: {train_loss:.6f}  Val: {val_loss:.6f}  LR: {lr:.6f}"
     )
 
-    # ---- 实时渲染刷新 ----
-    if test_X_tensor is not None:
-        model.eval()
-        with torch.no_grad():
-            # 直接乘回 Base Color 完成渲染闭环！不再做任何逆向 Tone Mapping！
-            preds_hdr = model(test_X_tensor).cpu().numpy()
-            preds_hdr = np.maximum(preds_hdr, 0.0) # 防止轻微负数
-            preds = preds_hdr * base_color
-            temp_img = np.zeros((test_h, test_w, 3), dtype=np.float32)
-            for i, (py, px) in enumerate(preview_pixels):
-                temp_img[py, px] = preds[i]
-            im_pred.set_data(np.clip(simple_aces(temp_img), 0, 1))
-            axes[0].set_title(f"MLP Epoch {epoch+1}\nLoss: {val_loss:.4f}")
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
-            plt.pause(0.01)
-
     # 保存最佳模型 + Early Stopping
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         no_improve_count = 0
         torch.save(model.state_dict(), f"{data_dir}/best_model.pt")
-        print(f"  → 最佳模型已保存 (val_loss: {val_loss:.6f})")
+        export_model_json(model, f"{data_dir}/jade_sss_weights.json")
+        print(f"  → 最佳模型已保存 (val_loss: {val_loss:.6f}) 并已同步导出 JSON!")
     else:
         no_improve_count += 1
         if no_improve_count >= patience:
@@ -338,30 +335,7 @@ state_dict = model.state_dict()
 state_dict["y_scale"] = torch.from_numpy(np.array([1.0, 1.0, 1.0], dtype=np.float32))
 save_file(state_dict, f"{data_dir}/jade_sss_weights.safetensors")
 print(f"导出完成: {data_dir}/jade_sss_weights.safetensors")
-# 2. 内存热转换：直接导出一份供 C++ RTXNS 引擎消费的 JSON
-import json
-
-out_data = {"layers": [], "input_dim": model.encoder.output_dim // (1 + model.encoder.freq_bands * 2), "freq_bands": model.encoder.freq_bands}
-# 你的 nn.Sequential 中真实的 Linear 层的索引是 0, 2, 4, 6 (夹着 ReLU)
-for i in [0, 2, 4, 6]:
-    w = state_dict[f"layers.{i}.weight"].cpu().numpy()
-    b = state_dict[f"layers.{i}.bias"].cpu().numpy()
-
-    out_data["layers"].append(
-        {
-            "num_inputs": w.shape[1],
-            "num_outputs": w.shape[0],
-            "weights": w.flatten().tolist(),  # 碾平为 C++ 识别的一维数组
-            "biases": b.flatten().tolist(),
-        }
-    )
-# 导出训练时的归一化参数，C++ 推理端必须使用完全相同的值！
-out_data["y_scale"] = [1.0, 1.0, 1.0]
-out_data["base_color"] = base_color.tolist()
-json_path = f"{data_dir}/jade_sss_weights.json"
-with open(json_path, "w") as f:
-    json.dump(out_data, f)
-print(f"跨语言同步导出完成: {json_path} (供 C++ RTXNS 加载)")
+# 2. 导出完毕
 print(f"  → y_scale (ToneMapped) = [1.0, 1.0, 1.0]")
 print(f"  → base_color = {base_color.tolist()}")
 # =========================================
@@ -376,7 +350,6 @@ with torch.no_grad():
     sample_pred = sample_hdr * base_color
     sample_gt = Y_val[:5] * base_color
 
-    # 防止你在第三步忘了改 L1Loss，我们在这里加上 MSE 和 L1 的局部双对比提示
     for i in range(5):
         p = sample_pred[i]
         g = sample_gt[i]
