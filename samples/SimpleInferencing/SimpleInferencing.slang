@@ -148,91 +148,57 @@ float4 Disney(float NdotL, float NdotV, float NdotH, float LdotH, float roughnes
     return float4((1 / DISNEY_PI) * ss, Gs * Ds, FH, .25 * Gr * Fr * Dr);
 }
 
-float4 DisneyMLP(float NdotL, float NdotV, float NdotH, float LdotH, float roughness)
-{   
-    uint4 weightOffsets = gConst.weightOffsets; 
-    uint4 biasOffsets = gConst.biasOffsets;  
-
-   CoopVec<VECTOR_FORMAT, INPUT_NEURONS> inputParams;
-   CoopVec<VECTOR_FORMAT, HIDDEN_NEURONS> hiddenParams;
-   CoopVec<VECTOR_FORMAT, OUTPUT_NEURONS> outputParams;
-
-   // Encode input parameters, 5 inputs to 30 parameters 
-   float params[INPUT_FEATURES] = { NdotL, NdotV, NdotH, LdotH, roughness };
-   inputParams = rtxns::EncodeFrequency<half, INPUT_FEATURES>(params);
-   
-   // Forward propagation through the neural network
-   hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, HIDDEN_NEURONS, INPUT_NEURONS>(
-       inputParams, gMLPParams, weightOffsets[0], biasOffsets[0], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-   hiddenParams = rtxns::relu(hiddenParams);
-   
-   hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, HIDDEN_NEURONS, HIDDEN_NEURONS>(
-       hiddenParams, gMLPParams, weightOffsets[1], biasOffsets[1], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-   hiddenParams = rtxns::relu(hiddenParams);
-   
-   hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, HIDDEN_NEURONS, HIDDEN_NEURONS>(
-       hiddenParams, gMLPParams, weightOffsets[2], biasOffsets[2], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-   hiddenParams = rtxns::relu(hiddenParams);
-   
-   outputParams = rtxns::LinearOp<VECTOR_FORMAT, OUTPUT_NEURONS, HIDDEN_NEURONS>(
-       hiddenParams, gMLPParams, weightOffsets[3], biasOffsets[3], CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-   outputParams = exp(outputParams);
-
-    return float4(outputParams[0], outputParams[1], outputParams[2], outputParams[3]);
-}
-
 // =============================================================================
 // Unified MLP: pure PyTorch offline equivalent (3 layers 64 width)
 // =============================================================================
-void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao, float roughness, float metallic, out float results[UNIFIED_OUTPUT_NEURONS])
+void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
 {
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, VdotL, thickness, ao, roughness, metallic
+        NdotL, NdotV, VdotL, thickness, ao, curvature
     };
 
-    CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS> inputParams = CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS>(VECTOR_FORMAT(0.0));
+    CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS> inputParams;
     CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> hiddenParams;
     CoopVec<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS> outputParams;
 
-    // Custom Frequency Encoding matching FrequencyEncoder(input_dim=7, freq_bands=2) in PyTorch
-    // PyTorch torch.cat(encodings, dim=-1) puts all original vars first, then all sin(1v), then all cos(1v)...
     [ForceUnroll]
     for (int i = 0; i < UNIFIED_INPUT_FEATURES; ++i) {
-        float x = params[i];
-        inputParams[i] = VECTOR_FORMAT(x);
-        inputParams[UNIFIED_INPUT_FEATURES + i] = VECTOR_FORMAT(sin(1.0f * 3.14159265f * x));
-        inputParams[UNIFIED_INPUT_FEATURES*2 + i] = VECTOR_FORMAT(cos(1.0f * 3.14159265f * x));
-        inputParams[UNIFIED_INPUT_FEATURES*3 + i] = VECTOR_FORMAT(sin(2.0f * 3.14159265f * x));
-        inputParams[UNIFIED_INPUT_FEATURES*4 + i] = VECTOR_FORMAT(cos(2.0f * 3.14159265f * x));
+        inputParams[i] = VECTOR_FORMAT(params[i]);
     }
 
-    // Layer 0: 35 -> 64
+    // Layer 0: 6 -> 256
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_INPUT_NEURONS>(
         inputParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].x, gConst.uniBiasOffsets[0].x,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-    hiddenParams = rtxns::relu(hiddenParams);
+    [ForceUnroll] for (int act_i = 0; act_i < UNIFIED_HIDDEN_NEURONS; ++act_i) {
+        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
+    }
 
-    // Layer 1: 64 -> 64
+    // Layer 1: 256 -> 256
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].y, gConst.uniBiasOffsets[0].y,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-    hiddenParams = rtxns::relu(hiddenParams);
+    [ForceUnroll] for (int act_i = 0; act_i < UNIFIED_HIDDEN_NEURONS; ++act_i) {
+        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
+    }
 
-    // Layer 2: 64 -> 64
+    // Layer 2: 256 -> 256
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].z, gConst.uniBiasOffsets[0].z,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
-    hiddenParams = rtxns::relu(hiddenParams);
+    [ForceUnroll] for (int act_i = 0; act_i < UNIFIED_HIDDEN_NEURONS; ++act_i) {
+        hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
+    }
 
     // Layer 3 (output): 64 -> 3
     outputParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].w, gConst.uniBiasOffsets[0].w,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
 
-    // PyTorch uses Sigmoid activation on output colors!
+    // The model outputs raw unbounded HDR predictions. We only prevent negative values.
     for (int i = 0; i < UNIFIED_OUTPUT_NEURONS; ++i) {
         float rawOutput = float(outputParams[i]);
-        results[i] = 1.0f / (1.0f + exp(-rawOutput));
+        results[i] = max(rawOutput, 0.0f);
     }
 }
 
@@ -262,6 +228,7 @@ void main_ps(
     float thickness = 0.5; // Default thickness
     float3 emissive = float3(0, 0, 0);
     float ao = 1.0;
+    float curvature = 0.0;
 
     if (gConst.usePerVertexMaterial != 0 && gConst.materialCount > 0)
     {
@@ -300,6 +267,12 @@ void main_ps(
         if (mat.thicknessTexIdx >= 0)
         {
             thickness = SampleMaterialTexture(mat.thicknessTexIdx, vOut.uv).g;
+        }
+
+        // Curvature map (hijacked from clearcoat)
+        if (mat.curvatureTexIdx >= 0)
+        {
+            curvature = SampleMaterialTexture(mat.curvatureTexIdx, vOut.uv).r;
         }
         
         // Emissive
@@ -378,25 +351,20 @@ void main_ps(
     // ---- Check for unified neural shading mode ----
     float3 sssTransmittance = float3(0, 0, 0);
 
-    // Only apply to objects that have a thickness map, or fallback to true for procedural sphere
+    // Apply neural shading universally when enabled
     bool isNeuralTarget = true;
-    if (gConst.usePerVertexMaterial != 0 && gConst.materialCount > 0) {
-        uint matIdx = min(vOut.materialIndex, gConst.materialCount - 1);
-        isNeuralTarget = (g_Materials[matIdx].thicknessTexIdx >= 0);
-    }
-
+    
     if (gConst.enableNeuralIBL != 0 && isNeuralTarget)
     {
         // UNIVERSAL MLP: perfectly replaces rendering logic predicting the pure RGB
         float mlpResults[UNIFIED_OUTPUT_NEURONS];
-        // The Python dataset was strictly trained with roughness=0.15 and metallic=0.0
-        // Feeding anything else (like Metallic 1.0 from the UI) triggers untrained explosive noise!
-        UnifiedMLP(NdotL, NdotV, VdotL, thickness, ao, 0.15f, 0.0f, mlpResults);
         
-        // Output from MLP is Sigmoid bound [0, 1].
-        // Scale with the recent 5.0 clipped y_max, BUT ALSO multiply by UI light intensity!
-        float3 y_scale = float3(5.0, 5.0, 5.0); 
-        float3 neuralDiffuse = float3(mlpResults[0], mlpResults[1], mlpResults[2]) * y_scale; 
+        UnifiedMLP(NdotL, NdotV, VdotL, thickness, ao, curvature, mlpResults);
+        
+        // Output from MLP is pure HDR.
+        // Direct multiply the decoupled transmittance with the Base Color!
+        float3 hdrTransmittance = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
+        float3 neuralDiffuse = hdrTransmittance * baseColor.rgb; 
         
         // Allow the UI Light Intensity (and an ambient floor of 0.2) to scale the brightness!
         neuralDiffuse *= (gConst.lightIntensity.rgb + 0.2);
@@ -408,13 +376,15 @@ void main_ps(
         // Now we calculate the exact same mathematical sharp SPECULAR highlight as the engine uses!
         
         // Directional Light Specular (Microfacet BRDF math)
-        float3 H = normalize(V + L);
-        float NdotH = saturate(dot(N, H));
-        float LdotH = saturate(dot(L, H));
+        float3 V_dir = view;
+        float3 L_dir = normalize(-lightDir.xyz);
+        float3 H = normalize(V_dir + L_dir);
+        float NdotH_spec = saturate(dot(N, H));
+        float LdotH_spec = saturate(dot(L_dir, H));
         
         float a = roughness * roughness;
         float a2 = a * a;
-        float d = (NdotH * NdotH) * (a2 - 1.0) + 1.0;
+        float d = (NdotH_spec * NdotH_spec) * (a2 - 1.0) + 1.0;
         float D = a2 / (3.14159265 * d * d);
         
         float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
@@ -423,7 +393,7 @@ void main_ps(
         float G = GV * GL;
         
         float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
-        float3 F = F0 + (1.0 - F0) * pow(1.0 - LdotH, 5.0);
+        float3 F = F0 + (1.0 - F0) * pow(1.0 - LdotH_spec, 5.0);
         
         float3 specularTerm = (D * G * F) / max(4.0 * NdotV * NdotL, 0.001) * NdotL;
         // Multiply by the raw light energy
@@ -446,41 +416,22 @@ void main_ps(
     else
     {
         // ---- Disney BRDF ----
-        if (gConst.enableNeuralShading != 0) {
-            outParams = DisneyMLP(NdotL, NdotV, NdotH, LdotH, roughness);
-        } else {
-            outParams = Disney(NdotL, NdotV, NdotH, LdotH, roughness);
-        }
+        // Disney BRDF math collapses (division by zero / NaNs) if NdotL is negative.
+        // Neural network supports negative NdotL, but the analytical fallback must be clamped.
+        outParams = Disney(max(1e-5f, NdotL), NdotV, clamp(NdotH, 0.0, 1.0), LdotH, roughness);
 
         // BRDF LUT
         envBRDF = t_BRDFLut.SampleLevel(s_Skybox, clamp(float2(NdotV, roughness), 0.01, 0.99), 0).rg;
-        
-        // ---- Analytical Sub-Surface Scattering Base Math (Ground Truth Fallback) ----
-        float3 SCATTER_COLOR = float3(1.5, 4.0, 1.0);
-        float wrap = 0.8;
-        float wrappedL = max(0.0, (NdotL + wrap) / (1.0 + wrap));
-        float phase = max(0.0, VdotL * 0.5 + 0.5);
-        float depth = max(0.01, thickness * 2.0); 
-        sssTransmittance = exp(-depth / SCATTER_COLOR) * wrappedL * phase * 3.5;
     }
 
     // ---- Arithmetic Composition (Linear Albedo * Lighting) ----
     float3 Cdlin = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
     float3 Cspec0 = lerp(specular * .08f * float3(1,1,1), Cdlin, metallic);
     
-    // Directional (Forward + Backlight SSS)
-    // For standard BRDF, clamp NdotL. For SSS, use raw light direction.
+    // Directional
     float forwardNdotL = max(0.0, NdotL);
     float3 brdfn = outParams.x * Cdlin * (1 - metallic) + outParams.y * lerp(Cspec0, float3(1), outParams.z) + outParams.w;
     float3 colorh = brdfn * forwardNdotL * lightIntensity.rgb;
-    
-    // Add Subsurface Scattering Glow
-    float3 sssBaseColor = float3(0.6, 0.9, 0.4); // Jade hue
-    float3 effectiveGlowColor = lerp(Cdlin, sssBaseColor, 0.8); // Trust the SSS base color heavily
-    
-    // Greatly boost the transmittence glow so it feels like soft jade instead of hard ceramic
-    float3 sssGlow = sssTransmittance * effectiveGlowColor * lightIntensity.rgb * 5.0;
-    colorh += sssGlow;
 
     // Ambient / IBL
     float3 envSpecularFinal = iblSpecular * (Cspec0 * envBRDF.x + envBRDF.y);
@@ -492,5 +443,11 @@ void main_ps(
     PBR_IBL *= ao;
 
     // Combine: directional light + IBL + emissive
-    o_color = float4(colorh + PBR_IBL + emissive, baseColor.a);
+    float3 finalColor = colorh + PBR_IBL + emissive;
+    
+    // ACES Film Tonemapping to safely compress blinding highlights into smooth gradient
+    float3 t_x = max(0, finalColor - 0.004);
+    finalColor = (t_x * (6.2 * t_x + 0.5)) / (t_x * (6.2 * t_x + 1.7) + 0.06);
+
+    o_color = float4(finalColor, baseColor.a);
  }

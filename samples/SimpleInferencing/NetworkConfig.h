@@ -21,11 +21,11 @@
 #define HIDDEN_NEURONS 32
 
 // --- Universal Math MLP (PyTorch Equivalent) ---
-// Input: NdotL, NdotV, VdotL, thick, ao, roughness, metallic = 7
-#define UNIFIED_INPUT_FEATURES 7
-#define UNIFIED_INPUT_NEURONS 35 // 7 inputs * (1 + 2 freq_bands * 2 (sin/cos)) = 35 encoded features
+// Input: NdotL, NdotV, VdotL, thick, ao, curvature = 6
+#define UNIFIED_INPUT_FEATURES 6
+#define UNIFIED_INPUT_NEURONS 6 // Removed frequency encoding to prevent angular high-frequency aliasing
 #define UNIFIED_OUTPUT_NEURONS 3 // RGB output
-#define UNIFIED_HIDDEN_NEURONS 64
+#define UNIFIED_HIDDEN_NEURONS 256
 #define UNIFIED_NUM_HIDDEN_LAYERS 3                        // 4 transitions total (3 hidden layers + 1 output)
 #define UNIFIED_NUM_TRANSITIONS (UNIFIED_NUM_HIDDEN_LAYERS + 1) // 4
 #define UNIFIED_NUM_TRANSITIONS_ALIGN4 ((UNIFIED_NUM_TRANSITIONS + 3) / 4) // 1
@@ -96,6 +96,7 @@ struct GpuMaterialParams
     int alphaMode;
     float alphaCutoff;
     int thicknessTexIdx; // Replaced _pad0
+    int curvatureTexIdx; // Hijacked from GLTF clearcoat_texture
 };
 
 // Training constant buffer for unified MLP

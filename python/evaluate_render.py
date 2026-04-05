@@ -28,7 +28,7 @@ def load_exr_channels(filepath, channels=('R', 'G', 'B', 'A')):
 # 1. 网络结构
 # =========================================
 class FrequencyEncoder(nn.Module):
-    def __init__(self, input_dim=7, freq_bands=4):
+    def __init__(self, input_dim=6, freq_bands=6):
         super().__init__()
         self.freq_bands = freq_bands
         self.output_dim = input_dim * (1 + freq_bands * 2)
@@ -43,8 +43,8 @@ class FrequencyEncoder(nn.Module):
 class NeuralSSS(nn.Module):
     def __init__(self):
         super().__init__()
-        self.encoder = FrequencyEncoder(input_dim=7, freq_bands=4)
-        width = 128
+        self.encoder = FrequencyEncoder(input_dim=6, freq_bands=6)
+        width = 256
         self.layers = nn.Sequential(
             nn.Linear(self.encoder.output_dim, width),
             nn.ReLU(),
@@ -57,7 +57,7 @@ class NeuralSSS(nn.Module):
 
     def forward(self, x):
         x = self.encoder(x)
-        return torch.sigmoid(self.layers(x))
+        return self.layers(x)  # Raw output; clamp at inference
 
 # =========================================
 # 2. 渲染主函数
@@ -105,6 +105,14 @@ def render_offline_preview(test_idx=0):
         _ao = safe_load_exr('ao_map')
         ao_map = _ao[:, :, 0] if _ao.ndim == 3 else _ao
         
+        # Add curvature map support
+        try:
+            _curv = safe_load_exr('curvature_map')
+            curvature_map = _curv[:, :, 0] if _curv.ndim == 3 else _curv
+        except FileNotFoundError:
+            # Fallback to zeros if it's missing
+            curvature_map = np.zeros_like(ao_map)
+        
         cam_pos_file = os.path.join(data_dir, 'camera_pos.npy')
         if os.path.exists(cam_pos_file):
             cam_pos = np.load(cam_pos_file)
@@ -150,9 +158,10 @@ def render_offline_preview(test_idx=0):
             VdotL = np.dot(V, L)
             thick = thickness_map[y, x]
             ao = ao_map[y, x]
+            curv = curvature_map[y, x]
             
-            # 严格保持与 C++ 一致的特征顺序绑定常量
-            feat = [NdotL, NdotV, VdotL, thick, ao, 0.15, 0.0]
+            # 严格保持与训练 + C++ 一致的特征顺序 (6维: 去掉了常数 roughness/metallic)
+            feat = [NdotL, NdotV, VdotL, thick, ao, curv]
             batch_features.append(feat)
             batch_pixels.append((y, x))
             
@@ -164,10 +173,12 @@ def render_offline_preview(test_idx=0):
         for i in range(0, len(X_tensor), 65536):
             chunk = X_tensor[i:i+65536]
             preds.append(model(chunk))
-        preds = torch.cat(preds, dim=0).cpu().numpy()
+        preds = torch.cat(preds, dim=0).clamp(0, 1).cpu().numpy()
     
     # 4. 根据 y_max 还原色彩
-    preds = preds * y_max
+    base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
+    # 结合 y_max 和材质反照率还原最终颜色
+    preds = preds * y_max * base_color
     
     for i, (y, x) in enumerate(batch_pixels):
         img_pred[y, x] = preds[i]

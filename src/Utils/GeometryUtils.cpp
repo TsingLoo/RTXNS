@@ -113,6 +113,7 @@ bool LoadOBJ(
     p.alphaMode = 0;
     p.alphaCutoff = 0.5f;
     p.thicknessTexIdx = -1;
+    p.curvatureTexIdx = -1;
     outMaterials.push_back(p);
 
     std::string line;
@@ -435,6 +436,12 @@ bool LoadGLTF(
             p.thicknessTexIdx = -1;
         }
 
+        if (mat->has_clearcoat) {
+            p.curvatureTexIdx = ResolveTextureIndex(mat->clearcoat.clearcoat_texture, data, imageToTextureIdx);
+        } else {
+            p.curvatureTexIdx = -1;
+        }
+
         outMaterials.push_back(p);
     }
     
@@ -456,6 +463,7 @@ bool LoadGLTF(
         p.alphaMode = 0;
         p.alphaCutoff = 0.5f;
         p.thicknessTexIdx = -1;
+        p.curvatureTexIdx = -1;
         outMaterials.push_back(p);
     }
     

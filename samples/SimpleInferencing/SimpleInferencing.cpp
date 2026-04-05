@@ -573,10 +573,17 @@ void SimpleInferencing::InitUnifiedNetwork()
     arch.biasPrecision = rtxns::Precision::F16;
 
     m_unifiedNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-    if (!m_unifiedNetwork->Initialise(arch))
+    
+    // First try loading the Python exported weights
+    auto nativeFS = std::make_shared<donut::vfs::NativeFileSystem>();
+    if (!m_unifiedNetwork->InitialiseFromJson(*nativeFS, "c:/tmp/jade_sss_data/jade_sss_weights.json"))
     {
-        log::error("Failed to create unified MLP network.");
-        return;
+        log::warning("Failed to load unified MLP from json, falling back to random init.");
+        if (!m_unifiedNetwork->Initialise(arch))
+        {
+            log::error("Failed to create unified MLP network.");
+            return;
+        }
     }
 
     // Create inferencing-optimal layout for rendering
@@ -599,10 +606,37 @@ void SimpleInferencing::InitUnifiedNetwork()
         bufDesc.canHaveRawViews = true;
         bufDesc.canHaveUAVs = true;
         bufDesc.debugName = "UnifiedMLPInferBuffer";
-        bufDesc.initialState = nvrhi::ResourceStates::ShaderResource;
+        bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
         bufDesc.keepInitialState = true;
         m_unifiedMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
     }
+    
+    // Upload weights to GPU
+    {
+        auto params = m_unifiedNetwork->GetNetworkParams();
+        nvrhi::BufferDesc hostBufDesc;
+        hostBufDesc.byteSize = params.size();
+        hostBufDesc.debugName = "UnifiedMLPUploadBuffer";
+        hostBufDesc.initialState = nvrhi::ResourceStates::CopyDest;
+        hostBufDesc.keepInitialState = true;
+        auto hostBuffer = GetDevice()->createBuffer(hostBufDesc);
+
+        auto cmdList = GetDevice()->createCommandList();
+        cmdList->open();
+        cmdList->writeBuffer(hostBuffer, params.data(), params.size());
+
+        m_networkUtils->ConvertWeights(m_unifiedNetwork->GetNetworkLayout(), inferLayout,
+                                       hostBuffer, 0, m_unifiedMLPInferBuffer, 0,
+                                       GetDevice(), cmdList);
+                                       
+        cmdList->setBufferState(m_unifiedMLPInferBuffer, nvrhi::ResourceStates::ShaderResource);
+        cmdList->commitBarriers();
+        
+        cmdList->close();
+        GetDevice()->executeCommandList(cmdList);
+    }
+    
+    m_unifiedReady = true;
 
     // Create binding layout + set for Set 3 (inferencing)
     {
@@ -906,7 +940,7 @@ void SimpleInferencing::ConvertUnifiedToInferencing()
         bufDesc.canHaveUAVs = true;
         bufDesc.debugName = "UnifiedMLPInferBuffer";
         bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = false;
+        bufDesc.keepInitialState = true;
         m_unifiedMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
 
         // Rebuild binding set with new buffer
@@ -1002,7 +1036,7 @@ void SimpleInferencing::LoadUnifiedWeights(const std::string& path)
         bufDesc.canHaveUAVs = true;
         bufDesc.debugName = "UnifiedMLPInferBuffer";
         bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = false;
+        bufDesc.keepInitialState = true;
         m_unifiedMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
 
         nvrhi::BindingSetDesc setDesc;

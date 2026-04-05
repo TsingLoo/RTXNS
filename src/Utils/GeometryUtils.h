@@ -47,6 +47,7 @@ struct MaterialParams
     int alphaMode;              // 0=opaque, 1=mask, 2=blend
     float alphaCutoff;
     int thicknessTexIdx;        // KHR_materials_volume
+    int curvatureTexIdx;        // Extracted from clearcoat
 };
 
 // Raw texture data loaded from GLTF

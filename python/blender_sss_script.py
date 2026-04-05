@@ -172,6 +172,8 @@ if not light:
 
 light.data.type = 'POINT'
 light.data.energy = 1000 * (size ** 2)
+# 彻底关闭阴影投射，确保渲染出的只包含纯粹的SSS散射数据
+light.data.use_shadow = False
 light_radius = size * 3
 
 def fibonacci_sphere(n):
@@ -180,7 +182,7 @@ def fibonacci_sphere(n):
     for i in range(n):
         theta = math.acos(1 - 2*(i + 0.5)/n)
         phi = 2 * math.pi * i / golden
-        points.append(Vector((math.sin(theta) * math.cos(phi), math.sin(theta) * math.sin(phi), abs(math.cos(theta)))))
+        points.append(Vector((math.sin(theta) * math.cos(phi), math.sin(theta) * math.sin(phi), math.cos(theta))))
     return points
 
 light_dirs = fibonacci_sphere(n_light_angles)
@@ -201,21 +203,58 @@ nodes.clear()
 geom_node = nodes.new('ShaderNodeNewGeometry')
 emit_node = nodes.new('ShaderNodeEmission')
 output_node = nodes.new('ShaderNodeOutputMaterial')
-
-links.new(geom_node.outputs['Position'], emit_node.inputs['Color'])
 emit_node.inputs['Strength'].default_value = 1.0
+
+# For Position: scaled_pos = (pos - center) / size + 0.5
+sub_node = nodes.new('ShaderNodeVectorMath')
+sub_node.operation = 'SUBTRACT'
+sub_node.inputs[1].default_value = center
+
+div_node = nodes.new('ShaderNodeVectorMath')
+div_node.operation = 'DIVIDE'
+div_node.inputs[1].default_value = (size, size, size)
+
+add_node = nodes.new('ShaderNodeVectorMath')
+add_node.operation = 'ADD'
+add_node.inputs[1].default_value = (0.5, 0.5, 0.5)
+
+links.new(geom_node.outputs['Position'], sub_node.inputs[0])
+links.new(sub_node.outputs[0], div_node.inputs[0])
+links.new(div_node.outputs[0], add_node.inputs[0])
+links.new(add_node.outputs[0], emit_node.inputs['Color'])
 links.new(emit_node.outputs['Emission'], output_node.inputs['Surface'])
 
 scene.cycles.samples = 1
 scene.render.image_settings.color_mode = 'RGB'
 scene.render.filepath = os.path.join(output_dir, 'position_map.exr')
 bpy.ops.render.render(write_still=True)
+np.save(os.path.join(output_dir, 'bbox_center.npy'), np.array(center, dtype=np.float32))
+np.save(os.path.join(output_dir, 'bbox_size.npy'), np.array([size], dtype=np.float32))
 print("Position Map 烘焙完成！")
 
-# 顺手把平滑过的 Normal Map 也吐出来
-links.new(geom_node.outputs['True Normal'], emit_node.inputs['Color'])
+
+# For Normal: scaled_norm = (norm * 0.5) + 0.5
+mul_node = nodes.new('ShaderNodeVectorMath')
+mul_node.operation = 'MULTIPLY'
+mul_node.inputs[1].default_value = (0.5, 0.5, 0.5)
+
+add_norm_node = nodes.new('ShaderNodeVectorMath')
+add_norm_node.operation = 'ADD'
+add_norm_node.inputs[1].default_value = (0.5, 0.5, 0.5)
+
+links.new(geom_node.outputs['Normal'], mul_node.inputs[0])
+links.new(mul_node.outputs[0], add_norm_node.inputs[0])
+links.new(add_norm_node.outputs[0], emit_node.inputs['Color'])
+
 scene.render.filepath = os.path.join(output_dir, 'normal_map.exr')
 bpy.ops.render.render(write_still=True)
 print("Normal Map 烘焙完成！")
+
+# 烘焙曲率 (Curvature / Pointiness) 图
+if 'Pointiness' in geom_node.outputs:
+    links.new(geom_node.outputs['Pointiness'], emit_node.inputs['Color'])
+    scene.render.filepath = os.path.join(output_dir, 'curvature_map.exr')
+    bpy.ops.render.render(write_still=True)
+    print("Curvature/Pointiness Map 烘焙完成！")
 
 print("========== 全部生成任务圆满完成 ==========")

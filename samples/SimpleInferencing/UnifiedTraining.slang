@@ -159,18 +159,26 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- MLP forward pass ---
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, VdotL, thickness, 1.0f, roughness, 0.0f
+        NdotL, NdotV, VdotL, thickness, 1.0f, 0.0f
     };
     
     CoopVec<half, UNIFIED_INPUT_NEURONS> inputParams = CoopVec<half, UNIFIED_INPUT_NEURONS>((half)0.0);
     [ForceUnroll]
     for (int i = 0; i < UNIFIED_INPUT_FEATURES; ++i) {
         float x = params[i];
-        inputParams[i * 5 + 0] = (half)(x);
-        inputParams[i * 5 + 1] = (half)(sin(1.0f * 3.14159265f * x));
-        inputParams[i * 5 + 2] = (half)(cos(1.0f * 3.14159265f * x));
-        inputParams[i * 5 + 3] = (half)(sin(2.0f * 3.14159265f * x));
-        inputParams[i * 5 + 4] = (half)(cos(2.0f * 3.14159265f * x));
+        inputParams[i] = (half)(x);
+        inputParams[UNIFIED_INPUT_FEATURES + i] = (half)(sin(1.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*2 + i] = (half)(cos(1.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*3 + i] = (half)(sin(2.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*4 + i] = (half)(cos(2.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*5 + i] = (half)(sin(4.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*6 + i] = (half)(cos(4.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*7 + i] = (half)(sin(8.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*8 + i] = (half)(cos(8.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*9 + i] = (half)(sin(16.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*10 + i] = (half)(cos(16.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*11 + i] = (half)(sin(32.0f * 3.14159265f * x));
+        inputParams[UNIFIED_INPUT_FEATURES*12 + i] = (half)(cos(32.0f * 3.14159265f * x));
     }
 
     var model = rtxns::mlp::TrainingMLP<half,
