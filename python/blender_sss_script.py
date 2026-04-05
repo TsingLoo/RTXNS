@@ -170,7 +170,7 @@ if not light:
     scene.collection.objects.link(light)
 
 light.data.type = 'POINT'
-light.data.energy = 5000 * (size ** 2)
+light.data.energy = 1000 * (size ** 2)
 # 完全关闭阴影！以保证只提取纯粹由厚度主导的局部 SSS 衰减，避免全局自遮挡产生的不可学习黑斑！
 light.data.use_shadow = False
 light_radius = size * 3
