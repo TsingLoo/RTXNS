@@ -588,3 +588,33 @@ def finalize_model(ctx):
 
     print("========== 模型最终处理完成 ==========")
     return images
+
+if __name__ == "__main__":
+    # 支持在命令行直接运行: blender -b file.blend -P blender_model_prep.py
+    import sys
+    try:
+        # 优先使用活动的物体，如果没有，则查找第一个网格物体
+        obj = bpy.context.active_object
+        if not obj or obj.type != 'MESH':
+            for o in bpy.context.scene.objects:
+                if o.type == 'MESH':
+                    obj = o
+                    break
+                    
+        if not obj:
+            raise RuntimeError("在场景中没有找到网格(MESH)物体！")
+            
+        # 默认将其输出到与 blend 文件同级的一个新文件夹中
+        blend_dir = os.path.dirname(bpy.data.filepath) if bpy.data.filepath else "/tmp"
+        out_dir = os.path.join(blend_dir, f"{obj.name}_sss_prepared")
+        
+        print(f"发现网格物体: {obj.name}，准备导出到 {out_dir}")
+        
+        ctx = prepare_model(obj, out_dir)
+        finalize_model(ctx)
+        
+        print(f"\n[成功] 脚本独立运行完成，数据存放在: {out_dir}")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n[错误] {e}")
+        sys.exit(1)
