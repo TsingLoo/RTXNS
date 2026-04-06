@@ -134,11 +134,66 @@ bool SimpleInferencing::Init()
 
     m_neuralTimer = GetDevice()->createTimerQuery();
 
-    // ===== Initialize unified MLP (Disney + IBL baked) =====
-    InitUnifiedNetwork();
+    // ===== Initialize unified MLP (SSS) via NeuralMLP =====
+    {
+        NeuralMLPConfig cfg;
+        cfg.inputNeurons = UNIFIED_INPUT_NEURONS;
+        cfg.hiddenNeurons = UNIFIED_HIDDEN_NEURONS;
+        cfg.outputNeurons = UNIFIED_OUTPUT_NEURONS;
+        cfg.numHiddenLayers = UNIFIED_NUM_HIDDEN_LAYERS;
+        cfg.numTransitions = UNIFIED_NUM_TRANSITIONS;
+        cfg.numTransitionsAlign4 = UNIFIED_NUM_TRANSITIONS_ALIGN4;
+        cfg.batchSize = UNIFIED_BATCH_SIZE;
+        cfg.batchCount = UNIFIED_BATCH_COUNT;
+        cfg.threadsPerGroup = UNIFIED_THREADS_PER_GROUP;
+        cfg.threadsPerGroupOpt = UNIFIED_THREADS_PER_GROUP_OPT;
+        cfg.learningRate = UNIFIED_LEARNING_RATE;
+        cfg.lossScale = UNIFIED_LOSS_SCALE;
+        cfg.trainingShaderName = "app/UnifiedTraining";
+        cfg.optimizerShaderName = "app/UnifiedOptimizer";
+        cfg.inferBindingSet = 3;
+        cfg.debugPrefix = "Unified";
+        cfg.trainingCBSize = sizeof(UnifiedTrainingConstants);
+
+        // Try loading pre-trained weights from JSON
+        auto preloaded = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
+        auto nativeFS = std::make_shared<donut::vfs::NativeFileSystem>();
+        if (preloaded->InitialiseFromJson(*nativeFS, "c:/tmp/jade_sss_data/jade_sss_weights.json"))
+        {
+            m_unifiedMLP.InitFromNetwork(GetDevice(), m_networkUtils, m_shaderFactory, cfg, std::move(preloaded));
+        }
+        else
+        {
+            log::warning("Failed to load unified MLP from json, falling back to random init.");
+            m_unifiedMLP.Init(GetDevice(), m_networkUtils, m_shaderFactory, cfg);
+        }
+        m_unifiedMLP.onPipelineInvalidated = [this]() { m_pipeline = nullptr; };
+    }
 
     // ===== Initialize IBL Sampler MLP =====
-    InitIBLNetwork();
+    {
+        NeuralMLPConfig cfg;
+        cfg.inputNeurons = IBL_INPUT_NEURONS;
+        cfg.hiddenNeurons = IBL_HIDDEN_NEURONS;
+        cfg.outputNeurons = IBL_OUTPUT_NEURONS;
+        cfg.numHiddenLayers = IBL_NUM_HIDDEN_LAYERS;
+        cfg.numTransitions = IBL_NUM_TRANSITIONS;
+        cfg.numTransitionsAlign4 = IBL_NUM_TRANSITIONS_ALIGN4;
+        cfg.batchSize = IBL_BATCH_SIZE;
+        cfg.batchCount = IBL_BATCH_COUNT;
+        cfg.threadsPerGroup = IBL_THREADS_PER_GROUP;
+        cfg.threadsPerGroupOpt = IBL_THREADS_PER_GROUP_OPT;
+        cfg.learningRate = IBL_LEARNING_RATE;
+        cfg.lossScale = IBL_LOSS_SCALE;
+        cfg.trainingShaderName = "app/IBLTraining";
+        cfg.optimizerShaderName = "app/IBLOptimizer";
+        cfg.inferBindingSet = 4;
+        cfg.debugPrefix = "IBL";
+        cfg.trainingCBSize = sizeof(IBLTrainingConstants);
+
+        m_iblMLP.Init(GetDevice(), m_networkUtils, m_shaderFactory, cfg);
+        m_iblMLP.onPipelineInvalidated = [this]() { m_pipeline = nullptr; };
+    }
 
     return true;
 }
@@ -415,11 +470,11 @@ void SimpleInferencing::Animate(float seconds)
     auto t = int(GetDevice()->getTimerQueryTime(m_neuralTimer) * 1000000);
     if (t != 0)
     {
-        if (m_unifiedTrainingActive)
-            m_extraStatus = std::format(" - Neural - {:3d}us - Training epoch {} loss {:.4f}", t, m_unifiedEpoch, 0.0f);
-        else if (m_iblTrainingActive)
-            m_extraStatus = std::format(" - IBL MLP - {:3d}us - Training epoch {}", t, m_iblEpoch);
-        else if (m_userInterfaceParameters->enableNeuralSSS && m_unifiedReady)
+        if (m_unifiedMLP.IsTrainingActive())
+            m_extraStatus = std::format(" - Neural - {:3d}us - Training epoch {} loss {:.4f}", t, m_unifiedMLP.GetEpoch(), 0.0f);
+        else if (m_iblMLP.IsTrainingActive())
+            m_extraStatus = std::format(" - IBL MLP - {:3d}us - Training epoch {}", t, m_iblMLP.GetEpoch());
+        else if (m_userInterfaceParameters->enableNeuralSSS && m_unifiedMLP.IsReady())
             m_extraStatus = std::format(" - Unified MLP - {:3d}us", t);
         else
             m_extraStatus = std::format(" - Neural - {:3d}us", t);
@@ -454,10 +509,10 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
         psoDesc.bindingLayouts = { m_bindingLayout, m_skyboxRenderer->GetIBLBindingLayout() };
         if (m_materialBindingLayout)
             psoDesc.bindingLayouts.push_back(m_materialBindingLayout);
-        if (m_unifiedInferLayout)
-            psoDesc.bindingLayouts.push_back(m_unifiedInferLayout);
-        if (m_iblInferLayout)
-            psoDesc.bindingLayouts.push_back(m_iblInferLayout);
+        if (m_unifiedMLP.GetInferLayout())
+            psoDesc.bindingLayouts.push_back(m_unifiedMLP.GetInferLayout());
+        if (m_iblMLP.GetInferLayout())
+            psoDesc.bindingLayouts.push_back(m_iblMLP.GetInferLayout());
         psoDesc.primType = nvrhi::PrimitiveType::TriangleList;
         psoDesc.renderState.depthStencilState.depthTestEnable = true;
         psoDesc.renderState.depthStencilState.depthWriteEnable = true;
@@ -492,20 +547,12 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     modelConstant.usePerVertexMaterial = m_hasPerVertexMaterials ? 1u : 0u;
     modelConstant.materialCount = m_materialCount;
     modelConstant.textureCount = m_textureCount;
-    modelConstant.enableNeuralSSS = (m_userInterfaceParameters->enableNeuralSSS && m_unifiedReady) ? 1u : 0u;
-    for (int i = 0; i < UNIFIED_NUM_TRANSITIONS_ALIGN4; ++i)
-    {
-        modelConstant.uniWeightOffsets[i] = m_unifiedWeightOffsets[i];
-        modelConstant.uniBiasOffsets[i] = m_unifiedBiasOffsets[i];
-    }
+    modelConstant.enableNeuralSSS = (m_userInterfaceParameters->enableNeuralSSS && m_unifiedMLP.IsReady()) ? 1u : 0u;
+    m_unifiedMLP.FillInferOffsets(modelConstant.uniWeightOffsets, modelConstant.uniBiasOffsets);
 
     // IBL Sampler MLP constants
-    modelConstant.enableNeuralIBL = (m_userInterfaceParameters->enableNeuralIBL && m_iblReady) ? 1u : 0u;
-    for (int i = 0; i < IBL_NUM_TRANSITIONS_ALIGN4; ++i)
-    {
-        modelConstant.iblWeightOffsets[i] = m_iblWeightOffsets[i];
-        modelConstant.iblBiasOffsets[i] = m_iblBiasOffsets[i];
-    }
+    modelConstant.enableNeuralIBL = (m_userInterfaceParameters->enableNeuralIBL && m_iblMLP.IsReady()) ? 1u : 0u;
+    m_iblMLP.FillInferOffsets(modelConstant.iblWeightOffsets, modelConstant.iblBiasOffsets);
     modelConstant.view = affineToHomogeneous(translation(-camPos) * lookatZ(-camDir, camUp));
     modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
     modelConstant.inverseViewProject = inverse(modelConstant.viewProject);
@@ -534,11 +581,11 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     if (m_materialBindingSet)
         state.bindings.push_back(m_materialBindingSet);
 
-    if (m_unifiedInferSet)
-        state.bindings.push_back(m_unifiedInferSet);
+    if (m_unifiedMLP.GetInferSet())
+        state.bindings.push_back(m_unifiedMLP.GetInferSet());
 
-    if (m_iblInferSet)
-        state.bindings.push_back(m_iblInferSet);
+    if (m_iblMLP.GetInferSet())
+        state.bindings.push_back(m_iblMLP.GetInferSet());
 
     state.indexBuffer = { m_indexBuffer, nvrhi::Format::R32_UINT, 0 };
 
@@ -571,981 +618,80 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     m_commandList->close();
     GetDevice()->executeCommandList(m_commandList);
 
-    // Run unified training if active
+    // Run unified SSS training if active
     if (m_userInterfaceParameters->trainUnified && m_skyboxRenderer && m_skyboxRenderer->GetIBLBindingSet())
     {
-        if (!m_unifiedTrainingActive)
+        if (!m_unifiedMLP.IsTrainingActive())
         {
-            CreateUnifiedTrainingResources();
-            m_unifiedTrainingActive = true;
-            m_unifiedTrainingStep = 0;
-            m_unifiedEpoch = 0;
+            m_unifiedMLP.CreateTrainingResources(
+                { m_skyboxRenderer->GetIBLBindingLayout() },
+                { m_skyboxRenderer->GetIBLBindingSet() });
+            m_unifiedMLP.SetTrainingActive(true);
         }
 
         auto trainCmd = GetDevice()->createCommandList();
         trainCmd->open();
-        TrainUnifiedStep(trainCmd);
+        m_unifiedMLP.TrainStep(trainCmd, { m_skyboxRenderer->GetIBLBindingSet() });
         trainCmd->close();
         GetDevice()->executeCommandList(trainCmd);
 
-        ++m_unifiedEpoch;
+        m_unifiedMLP.SetEpoch(m_unifiedMLP.GetEpoch() + 1);
 
-        // Convert to inferencing layout every 10 epochs for live preview
-        if (m_unifiedEpoch % 10 == 0)
+        if (m_unifiedMLP.GetEpoch() % 10 == 0)
         {
-            ConvertUnifiedToInferencing();
-            m_unifiedReady = true;
+            m_unifiedMLP.ConvertToInferencing();
+            m_unifiedMLP.SetReady(true);
         }
     }
-    else if (m_unifiedTrainingActive && !m_userInterfaceParameters->trainUnified)
+    else if (m_unifiedMLP.IsTrainingActive() && !m_userInterfaceParameters->trainUnified)
     {
-        // Training stopped — do final conversion
-        ConvertUnifiedToInferencing();
-        m_unifiedReady = true;
-        m_unifiedTrainingActive = false;
+        m_unifiedMLP.ConvertToInferencing();
+        m_unifiedMLP.SetReady(true);
+        m_unifiedMLP.SetTrainingActive(false);
     }
 
     // Run IBL Sampler training if active
     if (m_userInterfaceParameters->trainIBL)
     {
-        if (!m_iblTrainingActive)
+        if (!m_iblMLP.IsTrainingActive())
         {
-            CreateIBLTrainingResources();
-            m_iblTrainingActive = true;
-            m_iblTrainingStep = 0;
-            m_iblEpoch = 0;
+            m_iblMLP.CreateTrainingResources(); // No extra bindings (pure math)
+            m_iblMLP.SetTrainingActive(true);
         }
 
         auto iblCmd = GetDevice()->createCommandList();
         iblCmd->open();
-        TrainIBLStep(iblCmd);
+        m_iblMLP.TrainStep(iblCmd); // No extra sets
         iblCmd->close();
         GetDevice()->executeCommandList(iblCmd);
 
-        ++m_iblEpoch;
+        m_iblMLP.SetEpoch(m_iblMLP.GetEpoch() + 1);
 
-        if (m_iblEpoch % 10 == 0)
+        if (m_iblMLP.GetEpoch() % 10 == 0)
         {
-            ConvertIBLToInferencing();
-            m_iblReady = true;
+            m_iblMLP.ConvertToInferencing();
+            m_iblMLP.SetReady(true);
         }
     }
-    else if (m_iblTrainingActive && !m_userInterfaceParameters->trainIBL)
+    else if (m_iblMLP.IsTrainingActive() && !m_userInterfaceParameters->trainIBL)
     {
-        ConvertIBLToInferencing();
-        m_iblReady = true;
-        m_iblTrainingActive = false;
+        m_iblMLP.ConvertToInferencing();
+        m_iblMLP.SetReady(true);
+        m_iblMLP.SetTrainingActive(false);
     }
 }
 
 // =============================================================================
-// Unified MLP: Initialize the network
-// =============================================================================
-void SimpleInferencing::InitUnifiedNetwork()
-{
-    rtxns::NetworkArchitecture arch;
-    arch.numHiddenLayers = UNIFIED_NUM_HIDDEN_LAYERS;
-    arch.inputNeurons = UNIFIED_INPUT_NEURONS;
-    arch.hiddenNeurons = UNIFIED_HIDDEN_NEURONS;
-    arch.outputNeurons = UNIFIED_OUTPUT_NEURONS;
-    arch.weightPrecision = rtxns::Precision::F16;
-    arch.biasPrecision = rtxns::Precision::F16;
-
-    m_unifiedNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-    
-    // First try loading the Python exported weights
-    auto nativeFS = std::make_shared<donut::vfs::NativeFileSystem>();
-    if (!m_unifiedNetwork->InitialiseFromJson(*nativeFS, "c:/tmp/jade_sss_data/jade_sss_weights.json"))
-    {
-        log::warning("Failed to load unified MLP from json, falling back to random init.");
-        if (!m_unifiedNetwork->Initialise(arch))
-        {
-            log::error("Failed to create unified MLP network.");
-            return;
-        }
-    }
-
-    // Create inferencing-optimal layout for rendering
-    auto inferLayout = m_networkUtils->GetNewMatrixLayout(
-        m_unifiedNetwork->GetNetworkLayout(), rtxns::MatrixLayout::InferencingOptimal);
-
-    // Store inferencing offsets (5 layers packed into 2 x uint4)
-    memset(m_unifiedWeightOffsets, 0, sizeof(m_unifiedWeightOffsets));
-    memset(m_unifiedBiasOffsets, 0, sizeof(m_unifiedBiasOffsets));
-    for (int i = 0; i < UNIFIED_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(m_unifiedWeightOffsets)[i] = inferLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(m_unifiedBiasOffsets)[i] = inferLayout.networkLayers[i].biasOffset;
-    }
-
-    // Create the inferencing buffer
-    {
-        nvrhi::BufferDesc bufDesc;
-        bufDesc.byteSize = inferLayout.networkByteSize;
-        bufDesc.canHaveRawViews = true;
-        bufDesc.canHaveUAVs = true;
-        bufDesc.debugName = "UnifiedMLPInferBuffer";
-        bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = true;
-        m_unifiedMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
-    }
-    
-    // Upload weights to GPU
-    {
-        auto params = m_unifiedNetwork->GetNetworkParams();
-        nvrhi::BufferDesc hostBufDesc;
-        hostBufDesc.byteSize = params.size();
-        hostBufDesc.debugName = "UnifiedMLPUploadBuffer";
-        hostBufDesc.initialState = nvrhi::ResourceStates::CopyDest;
-        hostBufDesc.keepInitialState = true;
-        auto hostBuffer = GetDevice()->createBuffer(hostBufDesc);
-
-        auto cmdList = GetDevice()->createCommandList();
-        cmdList->open();
-        cmdList->writeBuffer(hostBuffer, params.data(), params.size());
-
-        m_networkUtils->ConvertWeights(m_unifiedNetwork->GetNetworkLayout(), inferLayout,
-                                       hostBuffer, 0, m_unifiedMLPInferBuffer, 0,
-                                       GetDevice(), cmdList);
-                                       
-        cmdList->setBufferState(m_unifiedMLPInferBuffer, nvrhi::ResourceStates::ShaderResource);
-        cmdList->commitBarriers();
-        
-        cmdList->close();
-        GetDevice()->executeCommandList(cmdList);
-    }
-    
-    m_unifiedReady = true;
-
-    // Create binding layout + set for Set 3 (inferencing)
-    {
-        nvrhi::BindingLayoutDesc layoutDesc;
-        layoutDesc.visibility = nvrhi::ShaderType::Pixel;
-        layoutDesc.registerSpace = 3;
-        layoutDesc.registerSpaceIsDescriptorSet = true;
-        layoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::RawBuffer_SRV(0)
-        };
-        m_unifiedInferLayout = GetDevice()->createBindingLayout(layoutDesc);
-
-        nvrhi::BindingSetDesc setDesc;
-        setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_unifiedMLPInferBuffer)
-        };
-        m_unifiedInferSet = GetDevice()->createBindingSet(setDesc, m_unifiedInferLayout);
-    }
-
-    // Force pipeline rebuild to include the new binding layout
-    m_pipeline = nullptr;
-
-    // Compile training shaders
-    m_unifiedTrainingCS = m_shaderFactory->CreateShader("app/UnifiedTraining", "main_cs", nullptr, nvrhi::ShaderType::Compute);
-    m_unifiedOptimizerCS = m_shaderFactory->CreateShader("app/UnifiedOptimizer", "adam_cs", nullptr, nvrhi::ShaderType::Compute);
-
-    if (!m_unifiedTrainingCS || !m_unifiedOptimizerCS)
-    {
-        log::warning("Failed to compile unified training/optimizer shaders.");
-    }
-
-    // Create training constant buffer
-    m_unifiedTrainingCB = GetDevice()->createBuffer(
-        nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(UnifiedTrainingConstants), "UnifiedTrainingCB")
-            .setInitialState(nvrhi::ResourceStates::ConstantBuffer)
-            .setKeepInitialState(true));
-
-    log::info("Unified MLP initialized: %d input features, %d hidden neurons, %d layers, %d output neurons",
-              UNIFIED_INPUT_FEATURES, UNIFIED_HIDDEN_NEURONS, UNIFIED_NUM_HIDDEN_LAYERS, UNIFIED_OUTPUT_NEURONS);
-}
-
-// =============================================================================
-// Unified MLP: Create/reset GPU training resources
-// =============================================================================
-void SimpleInferencing::CreateUnifiedTrainingResources()
-{
-    // Reset network to fresh random weights
-    rtxns::NetworkArchitecture arch;
-    arch.numHiddenLayers = UNIFIED_NUM_HIDDEN_LAYERS;
-    arch.inputNeurons = UNIFIED_INPUT_NEURONS;
-    arch.hiddenNeurons = UNIFIED_HIDDEN_NEURONS;
-    arch.outputNeurons = UNIFIED_OUTPUT_NEURONS;
-    arch.weightPrecision = rtxns::Precision::F16;
-    arch.biasPrecision = rtxns::Precision::F16;
-
-    m_unifiedNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-    if (!m_unifiedNetwork->Initialise(arch))
-    {
-        log::error("Failed to create unified MLP.");
-        return;
-    }
-
-    // Get training-optimal layout
-    m_unifiedDeviceLayout = m_networkUtils->GetNewMatrixLayout(
-        m_unifiedNetwork->GetNetworkLayout(), rtxns::MatrixLayout::TrainingOptimal);
-
-    auto hostBufferSize = m_unifiedNetwork->GetNetworkLayout().networkByteSize;
-    auto deviceBufferSize = m_unifiedDeviceLayout.networkByteSize;
-
-    assert((deviceBufferSize % sizeof(uint16_t)) == 0);
-    m_unifiedTotalParams = uint32_t(deviceBufferSize / sizeof(uint16_t));
-
-    // Create GPU buffers
-    {
-        nvrhi::BufferDesc desc;
-
-        desc.debugName = "UnifiedMLPHostBuffer";
-        desc.initialState = nvrhi::ResourceStates::CopyDest;
-        desc.byteSize = hostBufferSize;
-        desc.canHaveUAVs = true;
-        desc.keepInitialState = true;
-        m_unifiedMLPHostBuffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "UnifiedMLPDeviceBuffer";
-        desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        desc.byteSize = deviceBufferSize;
-        desc.canHaveRawViews = true;
-        desc.canHaveTypedViews = true;
-        desc.format = nvrhi::Format::R16_FLOAT;
-        m_unifiedMLPDeviceBuffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "UnifiedMLPFP32Buffer";
-        desc.canHaveRawViews = false;
-        desc.byteSize = m_unifiedTotalParams * sizeof(float);
-        desc.format = nvrhi::Format::R32_FLOAT;
-        m_unifiedMLPFP32Buffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "UnifiedGradientsBuffer";
-        desc.byteSize = (m_unifiedTotalParams * sizeof(uint16_t) + 3) & ~3;
-        desc.canHaveRawViews = true;
-        desc.structStride = sizeof(uint16_t);
-        desc.format = nvrhi::Format::R16_FLOAT;
-        m_unifiedGradientsBuffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "UnifiedMoments1";
-        desc.byteSize = m_unifiedTotalParams * sizeof(float);
-        desc.format = nvrhi::Format::R32_FLOAT;
-        desc.canHaveRawViews = false;
-        desc.structStride = 0;
-        m_unifiedMoments1 = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "UnifiedMoments2";
-        m_unifiedMoments2 = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "UnifiedLossBuffer";
-        desc.byteSize = UNIFIED_BATCH_SIZE * sizeof(float);
-        desc.format = nvrhi::Format::R32_FLOAT;
-        desc.canHaveTypedViews = true;
-        m_unifiedLossBuffer = GetDevice()->createBuffer(desc);
-    }
-
-    // Upload initial weights and convert layout
-    {
-        auto cmdList = GetDevice()->createCommandList();
-        cmdList->open();
-
-        cmdList->writeBuffer(m_unifiedMLPHostBuffer, 
-            m_unifiedNetwork->GetNetworkParams().data(), 
-            m_unifiedNetwork->GetNetworkParams().size());
-
-        m_networkUtils->ConvertWeights(
-            m_unifiedNetwork->GetNetworkLayout(), m_unifiedDeviceLayout,
-            m_unifiedMLPHostBuffer, 0, m_unifiedMLPDeviceBuffer, 0,
-            GetDevice(), cmdList);
-
-        // Clear gradient + moment buffers
-        cmdList->beginTrackingBufferState(m_unifiedGradientsBuffer, nvrhi::ResourceStates::UnorderedAccess);
-        cmdList->clearBufferUInt(m_unifiedGradientsBuffer, 0);
-        cmdList->beginTrackingBufferState(m_unifiedMoments1, nvrhi::ResourceStates::UnorderedAccess);
-        cmdList->clearBufferUInt(m_unifiedMoments1, 0);
-        cmdList->beginTrackingBufferState(m_unifiedMoments2, nvrhi::ResourceStates::UnorderedAccess);
-        cmdList->clearBufferUInt(m_unifiedMoments2, 0);
-
-        cmdList->close();
-        GetDevice()->executeCommandList(cmdList);
-    }
-
-    // Build training weight/bias offset arrays (training layout)
-    uint4 trainWeightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4] = {};
-    uint4 trainBiasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4] = {};
-    for (int i = 0; i < UNIFIED_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(trainWeightOffsets)[i] = m_unifiedDeviceLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(trainBiasOffsets)[i] = m_unifiedDeviceLayout.networkLayers[i].biasOffset;
-    }
-
-    // Create training binding layout + set
-    {
-        // Training layout: CB + SRV(weights) + UAV(gradients) + UAV(loss) — Set 0
-        // Also needs IBL cubemaps — Set 1
-        nvrhi::BindingLayoutDesc trainLayoutDesc;
-        trainLayoutDesc.visibility = nvrhi::ShaderType::Compute;
-        trainLayoutDesc.registerSpaceIsDescriptorSet = true;
-        trainLayoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::ConstantBuffer(0),
-            nvrhi::BindingLayoutItem::RawBuffer_SRV(0),
-            nvrhi::BindingLayoutItem::RawBuffer_UAV(0),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(1)
-        };
-        m_unifiedTrainingLayout = GetDevice()->createBindingLayout(trainLayoutDesc);
-
-        nvrhi::BindingSetDesc trainSetDesc;
-        trainSetDesc.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_unifiedTrainingCB),
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_unifiedMLPDeviceBuffer),
-            nvrhi::BindingSetItem::RawBuffer_UAV(0, m_unifiedGradientsBuffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(1, m_unifiedLossBuffer)
-        };
-        m_unifiedTrainingSet = GetDevice()->createBindingSet(trainSetDesc, m_unifiedTrainingLayout);
-
-        nvrhi::ComputePipelineDesc cpDesc;
-        cpDesc.CS = m_unifiedTrainingCS;
-        cpDesc.bindingLayouts = { m_unifiedTrainingLayout, m_skyboxRenderer->GetIBLBindingLayout() };
-        m_unifiedTrainingPipeline = GetDevice()->createComputePipeline(cpDesc);
-    }
-
-    // Create optimizer binding layout + set
-    {
-        nvrhi::BindingLayoutDesc optLayoutDesc;
-        optLayoutDesc.visibility = nvrhi::ShaderType::Compute;
-        optLayoutDesc.registerSpaceIsDescriptorSet = true;
-        optLayoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::ConstantBuffer(0),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(0),  // fp16 weights
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(1),  // fp32 weights
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(2),  // gradients
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(3),  // moments1
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(4)   // moments2
-        };
-        m_unifiedOptimizerLayout = GetDevice()->createBindingLayout(optLayoutDesc);
-
-        nvrhi::BindingSetDesc optSetDesc;
-        optSetDesc.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_unifiedTrainingCB),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(0, m_unifiedMLPDeviceBuffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(1, m_unifiedMLPFP32Buffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(2, m_unifiedGradientsBuffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(3, m_unifiedMoments1),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(4, m_unifiedMoments2)
-        };
-        m_unifiedOptimizerSet = GetDevice()->createBindingSet(optSetDesc, m_unifiedOptimizerLayout);
-
-        nvrhi::ComputePipelineDesc cpDesc;
-        cpDesc.CS = m_unifiedOptimizerCS;
-        cpDesc.bindingLayouts = { m_unifiedOptimizerLayout };
-        m_unifiedOptimizerPipeline = GetDevice()->createComputePipeline(cpDesc);
-    }
-
-    m_unifiedTrainingStep = 0;
-    m_unifiedEpoch = 0;
-    m_unifiedReady = false;
-
-    log::info("Unified MLP training resources created: %d total params (%d bytes fp16)",
-              m_unifiedTotalParams, m_unifiedTotalParams * 2);
-}
-
-// =============================================================================
-// Unified MLP: Run one epoch of training
-// =============================================================================
-void SimpleInferencing::TrainUnifiedStep(nvrhi::ICommandList* cmdList)
-{
-    std::uniform_int_distribution<uint64_t> ldist;
-    uint64_t seed = ldist(m_rd);
-
-    // Build training-layout offset arrays
-    uint4 trainWeightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4] = {};
-    uint4 trainBiasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4] = {};
-    for (int i = 0; i < UNIFIED_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(trainWeightOffsets)[i] = m_unifiedDeviceLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(trainBiasOffsets)[i] = m_unifiedDeviceLayout.networkLayers[i].biasOffset;
-    }
-
-    for (int batch = 0; batch < UNIFIED_BATCH_COUNT; ++batch)
-    {
-        ++m_unifiedTrainingStep;
-
-        UnifiedTrainingConstants trainConst = {};
-        for (int i = 0; i < UNIFIED_NUM_TRANSITIONS_ALIGN4; ++i)
-        {
-            trainConst.weightOffsets[i] = trainWeightOffsets[i];
-            trainConst.biasOffsets[i] = trainBiasOffsets[i];
-        }
-        trainConst.maxParamSize = m_unifiedTotalParams;
-        trainConst.learningRate = UNIFIED_LEARNING_RATE;
-        trainConst.currentStep = float(m_unifiedTrainingStep);
-        trainConst.batchSize = UNIFIED_BATCH_SIZE;
-        trainConst.seed = seed + batch;
-
-        cmdList->writeBuffer(m_unifiedTrainingCB, &trainConst, sizeof(trainConst));
-
-        // Training dispatch
-        nvrhi::ComputeState trainState;
-        trainState.pipeline = m_unifiedTrainingPipeline;
-        trainState.bindings = { m_unifiedTrainingSet, m_skyboxRenderer->GetIBLBindingSet() };
-        cmdList->setComputeState(trainState);
-        cmdList->dispatch(UNIFIED_BATCH_SIZE / UNIFIED_THREADS_PER_GROUP, 1, 1);
-
-        // Optimizer dispatch
-        nvrhi::ComputeState optState;
-        optState.pipeline = m_unifiedOptimizerPipeline;
-        optState.bindings = { m_unifiedOptimizerSet };
-        cmdList->setComputeState(optState);
-        cmdList->dispatch((m_unifiedTotalParams + UNIFIED_THREADS_PER_GROUP_OPT - 1) / UNIFIED_THREADS_PER_GROUP_OPT, 1, 1);
-    }
-}
-
-// =============================================================================
-// Unified MLP: Convert training weights to inferencing-optimal layout
-// =============================================================================
-void SimpleInferencing::ConvertUnifiedToInferencing()
-{
-    auto inferLayout = m_networkUtils->GetNewMatrixLayout(
-        m_unifiedNetwork->GetNetworkLayout(), rtxns::MatrixLayout::InferencingOptimal);
-
-    // Update inferencing offsets
-    memset(m_unifiedWeightOffsets, 0, sizeof(m_unifiedWeightOffsets));
-    memset(m_unifiedBiasOffsets, 0, sizeof(m_unifiedBiasOffsets));
-    for (int i = 0; i < UNIFIED_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(m_unifiedWeightOffsets)[i] = inferLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(m_unifiedBiasOffsets)[i] = inferLayout.networkLayers[i].biasOffset;
-    }
-
-    // Ensure inferencing buffer is large enough
-    if (!m_unifiedMLPInferBuffer || m_unifiedMLPInferBuffer->getDesc().byteSize < inferLayout.networkByteSize)
-    {
-        nvrhi::BufferDesc bufDesc;
-        bufDesc.byteSize = inferLayout.networkByteSize;
-        bufDesc.canHaveRawViews = true;
-        bufDesc.canHaveUAVs = true;
-        bufDesc.debugName = "UnifiedMLPInferBuffer";
-        bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = true;
-        m_unifiedMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
-
-        // Rebuild binding set with new buffer
-        nvrhi::BindingSetDesc setDesc;
-        setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_unifiedMLPInferBuffer)
-        };
-        m_unifiedInferSet = GetDevice()->createBindingSet(setDesc, m_unifiedInferLayout);
-        m_pipeline = nullptr; // Force pipeline rebuild
-    }
-
-    // Convert weights from training layout to inferencing layout
-    auto cmdList = GetDevice()->createCommandList();
-    cmdList->open();
-
-    cmdList->setBufferState(m_unifiedMLPInferBuffer, nvrhi::ResourceStates::UnorderedAccess);
-    cmdList->commitBarriers();
-
-    m_networkUtils->ConvertWeights(
-        m_unifiedDeviceLayout, inferLayout,
-        m_unifiedMLPDeviceBuffer, 0, m_unifiedMLPInferBuffer, 0,
-        GetDevice(), cmdList);
-
-    cmdList->setBufferState(m_unifiedMLPInferBuffer, nvrhi::ResourceStates::ShaderResource);
-    cmdList->commitBarriers();
-
-    cmdList->close();
-    GetDevice()->executeCommandList(cmdList);
-}
-
-// =============================================================================
-// Unified MLP: Save and Load weights
+// Save / Load unified weights — thin wrappers around NeuralMLP
 // =============================================================================
 void SimpleInferencing::SaveUnifiedWeights(const std::string& path)
 {
-    if (!m_unifiedNetwork || !m_unifiedMLPDeviceBuffer)
-    {
-        log::warning("No unified weights to save.");
-        return;
-    }
-
-    m_unifiedNetwork->UpdateFromBufferToFile(
-        m_unifiedMLPHostBuffer, m_unifiedMLPDeviceBuffer,
-        m_unifiedNetwork->GetNetworkLayout(), m_unifiedDeviceLayout,
-        path, GetDevice(), m_commandList);
-
-    log::info("Saved unified MLP weights to: %s", path.c_str());
+    m_unifiedMLP.SaveWeights(path, m_commandList);
 }
 
 void SimpleInferencing::LoadUnifiedWeights(const std::string& path)
 {
-    auto loaded = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-    bool success = false;
-
-    // Detect if file is JSON or native binary
-    if (path.length() >= 5 && path.substr(path.length() - 5) == ".json")
-    {
-        auto nativeFS = std::make_shared<donut::vfs::NativeFileSystem>();
-        success = loaded->InitialiseFromJson(*nativeFS, path);
-    }
-    else
-    {
-        success = loaded->InitialiseFromFile(path);
-    }
-
-    if (!success)
-    {
-        log::error("Failed to load unified weights from: %s", path.c_str());
-        return;
-    }
-
-    m_unifiedNetwork = std::move(loaded);
-
-    // Convert to inferencing layout and upload
-    auto inferLayout = m_networkUtils->GetNewMatrixLayout(
-        m_unifiedNetwork->GetNetworkLayout(), rtxns::MatrixLayout::InferencingOptimal);
-
-    // Update offsets
-    memset(m_unifiedWeightOffsets, 0, sizeof(m_unifiedWeightOffsets));
-    memset(m_unifiedBiasOffsets, 0, sizeof(m_unifiedBiasOffsets));
-    for (int i = 0; i < UNIFIED_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(m_unifiedWeightOffsets)[i] = inferLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(m_unifiedBiasOffsets)[i] = inferLayout.networkLayers[i].biasOffset;
-    }
-
-    // Recreate inferencing buffer if needed
-    if (!m_unifiedMLPInferBuffer || m_unifiedMLPInferBuffer->getDesc().byteSize < inferLayout.networkByteSize)
-    {
-        nvrhi::BufferDesc bufDesc;
-        bufDesc.byteSize = inferLayout.networkByteSize;
-        bufDesc.canHaveRawViews = true;
-        bufDesc.canHaveUAVs = true;
-        bufDesc.debugName = "UnifiedMLPInferBuffer";
-        bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = true;
-        m_unifiedMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
-
-        nvrhi::BindingSetDesc setDesc;
-        setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_unifiedMLPInferBuffer)
-        };
-        m_unifiedInferSet = GetDevice()->createBindingSet(setDesc, m_unifiedInferLayout);
-        m_pipeline = nullptr;
-    }
-
-    // Upload host and convert to device
-    nvrhi::BufferDesc hostDesc;
-    hostDesc.byteSize = m_unifiedNetwork->GetNetworkParams().size();
-    hostDesc.debugName = "UnifiedMLPLoadHost";
-    hostDesc.initialState = nvrhi::ResourceStates::CopyDest;
-    hostDesc.keepInitialState = true;
-    auto hostBuf = GetDevice()->createBuffer(hostDesc);
-
-    auto cmdList = GetDevice()->createCommandList();
-    cmdList->open();
-
-    cmdList->writeBuffer(hostBuf, m_unifiedNetwork->GetNetworkParams().data(),
-                         m_unifiedNetwork->GetNetworkParams().size());
-
-    cmdList->setBufferState(m_unifiedMLPInferBuffer, nvrhi::ResourceStates::UnorderedAccess);
-    cmdList->commitBarriers();
-
-    m_networkUtils->ConvertWeights(
-        m_unifiedNetwork->GetNetworkLayout(), inferLayout,
-        hostBuf, 0, m_unifiedMLPInferBuffer, 0,
-        GetDevice(), cmdList);
-
-    cmdList->setBufferState(m_unifiedMLPInferBuffer, nvrhi::ResourceStates::ShaderResource);
-    cmdList->commitBarriers();
-
-    cmdList->close();
-    GetDevice()->executeCommandList(cmdList);
-
-    m_unifiedReady = true;
-    log::info("Loaded unified MLP weights from: %s", path.c_str());
+    if (m_unifiedMLP.LoadWeights(path))
+        m_pipeline = nullptr; // force rebuild in case buffer changed
 }
 
-// =============================================================================
-// IBL Sampler MLP: Initialize the network
-// =============================================================================
-void SimpleInferencing::InitIBLNetwork()
-{
-    rtxns::NetworkArchitecture arch;
-    arch.numHiddenLayers = IBL_NUM_HIDDEN_LAYERS;
-    arch.inputNeurons = IBL_INPUT_NEURONS;
-    arch.hiddenNeurons = IBL_HIDDEN_NEURONS;
-    arch.outputNeurons = IBL_OUTPUT_NEURONS;
-    arch.weightPrecision = rtxns::Precision::F16;
-    arch.biasPrecision = rtxns::Precision::F16;
-
-    m_iblNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-    if (!m_iblNetwork->Initialise(arch))
-    {
-        log::error("Failed to create IBL Sampler MLP.");
-        return;
-    }
-
-    // Create inferencing-optimal layout
-    auto inferLayout = m_networkUtils->GetNewMatrixLayout(
-        m_iblNetwork->GetNetworkLayout(), rtxns::MatrixLayout::InferencingOptimal);
-
-    memset(m_iblWeightOffsets, 0, sizeof(m_iblWeightOffsets));
-    memset(m_iblBiasOffsets, 0, sizeof(m_iblBiasOffsets));
-    for (int i = 0; i < IBL_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(m_iblWeightOffsets)[i] = inferLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(m_iblBiasOffsets)[i] = inferLayout.networkLayers[i].biasOffset;
-    }
-
-    // Create inferencing buffer
-    {
-        nvrhi::BufferDesc bufDesc;
-        bufDesc.byteSize = inferLayout.networkByteSize;
-        bufDesc.canHaveRawViews = true;
-        bufDesc.canHaveUAVs = true;
-        bufDesc.debugName = "IBLMLPInferBuffer";
-        bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = true;
-        m_iblMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
-    }
-
-    // Upload initial (random) weights
-    {
-        auto params = m_iblNetwork->GetNetworkParams();
-        nvrhi::BufferDesc hostBufDesc;
-        hostBufDesc.byteSize = params.size();
-        hostBufDesc.debugName = "IBLMLPUploadBuffer";
-        hostBufDesc.initialState = nvrhi::ResourceStates::CopyDest;
-        hostBufDesc.keepInitialState = true;
-        auto hostBuffer = GetDevice()->createBuffer(hostBufDesc);
-
-        auto cmdList = GetDevice()->createCommandList();
-        cmdList->open();
-        cmdList->writeBuffer(hostBuffer, params.data(), params.size());
-
-        m_networkUtils->ConvertWeights(m_iblNetwork->GetNetworkLayout(), inferLayout,
-                                       hostBuffer, 0, m_iblMLPInferBuffer, 0,
-                                       GetDevice(), cmdList);
-
-        cmdList->setBufferState(m_iblMLPInferBuffer, nvrhi::ResourceStates::ShaderResource);
-        cmdList->commitBarriers();
-        cmdList->close();
-        GetDevice()->executeCommandList(cmdList);
-    }
-
-    // Create binding layout + set for Set 4 (inferencing)
-    {
-        nvrhi::BindingLayoutDesc layoutDesc;
-        layoutDesc.visibility = nvrhi::ShaderType::Pixel;
-        layoutDesc.registerSpace = 4;
-        layoutDesc.registerSpaceIsDescriptorSet = true;
-        layoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::RawBuffer_SRV(0)
-        };
-        m_iblInferLayout = GetDevice()->createBindingLayout(layoutDesc);
-
-        nvrhi::BindingSetDesc setDesc;
-        setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_iblMLPInferBuffer)
-        };
-        m_iblInferSet = GetDevice()->createBindingSet(setDesc, m_iblInferLayout);
-    }
-
-    // Force pipeline rebuild
-    m_pipeline = nullptr;
-
-    // Compile IBL training shaders
-    m_iblTrainingCS = m_shaderFactory->CreateShader("app/IBLTraining", "main_cs", nullptr, nvrhi::ShaderType::Compute);
-    m_iblOptimizerCS = m_shaderFactory->CreateShader("app/IBLOptimizer", "adam_cs", nullptr, nvrhi::ShaderType::Compute);
-
-    if (!m_iblTrainingCS || !m_iblOptimizerCS)
-    {
-        log::warning("Failed to compile IBL training/optimizer shaders.");
-    }
-
-    // Create training constant buffer
-    m_iblTrainingCB = GetDevice()->createBuffer(
-        nvrhi::utils::CreateStaticConstantBufferDesc(sizeof(IBLTrainingConstants), "IBLTrainingCB")
-            .setInitialState(nvrhi::ResourceStates::ConstantBuffer)
-            .setKeepInitialState(true));
-
-    log::info("IBL Sampler MLP initialized: %d input, %d hidden, %d layers, %d output (%d samples x 4 + 2 BRDF)",
-              IBL_INPUT_FEATURES, IBL_HIDDEN_NEURONS, IBL_NUM_HIDDEN_LAYERS, IBL_OUTPUT_NEURONS, IBL_NUM_SAMPLES);
-}
-
-// =============================================================================
-// IBL Sampler MLP: Create/reset GPU training resources
-// =============================================================================
-void SimpleInferencing::CreateIBLTrainingResources()
-{
-    rtxns::NetworkArchitecture arch;
-    arch.numHiddenLayers = IBL_NUM_HIDDEN_LAYERS;
-    arch.inputNeurons = IBL_INPUT_NEURONS;
-    arch.hiddenNeurons = IBL_HIDDEN_NEURONS;
-    arch.outputNeurons = IBL_OUTPUT_NEURONS;
-    arch.weightPrecision = rtxns::Precision::F16;
-    arch.biasPrecision = rtxns::Precision::F16;
-
-    m_iblNetwork = std::make_unique<rtxns::HostNetwork>(m_networkUtils);
-    if (!m_iblNetwork->Initialise(arch))
-    {
-        log::error("Failed to create IBL Sampler MLP for training.");
-        return;
-    }
-
-    m_iblDeviceLayout = m_networkUtils->GetNewMatrixLayout(
-        m_iblNetwork->GetNetworkLayout(), rtxns::MatrixLayout::TrainingOptimal);
-
-    auto hostBufferSize = m_iblNetwork->GetNetworkLayout().networkByteSize;
-    auto deviceBufferSize = m_iblDeviceLayout.networkByteSize;
-
-    assert((deviceBufferSize % sizeof(uint16_t)) == 0);
-    m_iblTotalParams = uint32_t(deviceBufferSize / sizeof(uint16_t));
-
-    // Create GPU buffers
-    {
-        nvrhi::BufferDesc desc;
-
-        desc.debugName = "IBLMLPHostBuffer";
-        desc.initialState = nvrhi::ResourceStates::CopyDest;
-        desc.byteSize = hostBufferSize;
-        desc.canHaveUAVs = true;
-        desc.keepInitialState = true;
-        m_iblMLPHostBuffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "IBLMLPDeviceBuffer";
-        desc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        desc.byteSize = deviceBufferSize;
-        desc.canHaveRawViews = true;
-        desc.canHaveTypedViews = true;
-        desc.format = nvrhi::Format::R16_FLOAT;
-        m_iblMLPDeviceBuffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "IBLMLPFP32Buffer";
-        desc.canHaveRawViews = false;
-        desc.byteSize = m_iblTotalParams * sizeof(float);
-        desc.format = nvrhi::Format::R32_FLOAT;
-        m_iblMLPFP32Buffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "IBLGradientsBuffer";
-        desc.byteSize = (m_iblTotalParams * sizeof(uint16_t) + 3) & ~3;
-        desc.canHaveRawViews = true;
-        desc.structStride = sizeof(uint16_t);
-        desc.format = nvrhi::Format::R16_FLOAT;
-        m_iblGradientsBuffer = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "IBLMoments1";
-        desc.byteSize = m_iblTotalParams * sizeof(float);
-        desc.format = nvrhi::Format::R32_FLOAT;
-        desc.canHaveRawViews = false;
-        desc.structStride = 0;
-        m_iblMoments1 = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "IBLMoments2";
-        m_iblMoments2 = GetDevice()->createBuffer(desc);
-
-        desc.debugName = "IBLLossBuffer";
-        desc.byteSize = IBL_BATCH_SIZE * sizeof(float);
-        desc.format = nvrhi::Format::R32_FLOAT;
-        desc.canHaveTypedViews = true;
-        m_iblLossBuffer = GetDevice()->createBuffer(desc);
-    }
-
-    // Upload initial weights and convert layout
-    {
-        auto cmdList = GetDevice()->createCommandList();
-        cmdList->open();
-
-        cmdList->writeBuffer(m_iblMLPHostBuffer,
-            m_iblNetwork->GetNetworkParams().data(),
-            m_iblNetwork->GetNetworkParams().size());
-
-        m_networkUtils->ConvertWeights(
-            m_iblNetwork->GetNetworkLayout(), m_iblDeviceLayout,
-            m_iblMLPHostBuffer, 0, m_iblMLPDeviceBuffer, 0,
-            GetDevice(), cmdList);
-
-        // Clear gradient + moment buffers
-        cmdList->beginTrackingBufferState(m_iblGradientsBuffer, nvrhi::ResourceStates::UnorderedAccess);
-        cmdList->clearBufferUInt(m_iblGradientsBuffer, 0);
-        cmdList->beginTrackingBufferState(m_iblMoments1, nvrhi::ResourceStates::UnorderedAccess);
-        cmdList->clearBufferUInt(m_iblMoments1, 0);
-        cmdList->beginTrackingBufferState(m_iblMoments2, nvrhi::ResourceStates::UnorderedAccess);
-        cmdList->clearBufferUInt(m_iblMoments2, 0);
-
-        cmdList->close();
-        GetDevice()->executeCommandList(cmdList);
-    }
-
-    // Build training weight/bias offset arrays
-    uint4 trainWeightOffsets[IBL_NUM_TRANSITIONS_ALIGN4] = {};
-    uint4 trainBiasOffsets[IBL_NUM_TRANSITIONS_ALIGN4] = {};
-    for (int i = 0; i < IBL_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(trainWeightOffsets)[i] = m_iblDeviceLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(trainBiasOffsets)[i] = m_iblDeviceLayout.networkLayers[i].biasOffset;
-    }
-
-    // Create training binding layout + set (NO cubemap — pure math training!)
-    {
-        nvrhi::BindingLayoutDesc trainLayoutDesc;
-        trainLayoutDesc.visibility = nvrhi::ShaderType::Compute;
-        trainLayoutDesc.registerSpaceIsDescriptorSet = true;
-        trainLayoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::ConstantBuffer(0),
-            nvrhi::BindingLayoutItem::RawBuffer_SRV(0),
-            nvrhi::BindingLayoutItem::RawBuffer_UAV(0),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(1)
-        };
-        m_iblTrainingLayout = GetDevice()->createBindingLayout(trainLayoutDesc);
-
-        nvrhi::BindingSetDesc trainSetDesc;
-        trainSetDesc.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_iblTrainingCB),
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_iblMLPDeviceBuffer),
-            nvrhi::BindingSetItem::RawBuffer_UAV(0, m_iblGradientsBuffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(1, m_iblLossBuffer)
-        };
-        m_iblTrainingSet = GetDevice()->createBindingSet(trainSetDesc, m_iblTrainingLayout);
-
-        nvrhi::ComputePipelineDesc cpDesc;
-        cpDesc.CS = m_iblTrainingCS;
-        cpDesc.bindingLayouts = { m_iblTrainingLayout }; // No cubemap binding set!
-        m_iblTrainingPipeline = GetDevice()->createComputePipeline(cpDesc);
-    }
-
-    // Create optimizer binding layout + set
-    {
-        nvrhi::BindingLayoutDesc optLayoutDesc;
-        optLayoutDesc.visibility = nvrhi::ShaderType::Compute;
-        optLayoutDesc.registerSpaceIsDescriptorSet = true;
-        optLayoutDesc.bindings = {
-            nvrhi::BindingLayoutItem::ConstantBuffer(0),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(0),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(1),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(2),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(3),
-            nvrhi::BindingLayoutItem::TypedBuffer_UAV(4)
-        };
-        m_iblOptimizerLayout = GetDevice()->createBindingLayout(optLayoutDesc);
-
-        nvrhi::BindingSetDesc optSetDesc;
-        optSetDesc.bindings = {
-            nvrhi::BindingSetItem::ConstantBuffer(0, m_iblTrainingCB),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(0, m_iblMLPDeviceBuffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(1, m_iblMLPFP32Buffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(2, m_iblGradientsBuffer),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(3, m_iblMoments1),
-            nvrhi::BindingSetItem::TypedBuffer_UAV(4, m_iblMoments2)
-        };
-        m_iblOptimizerSet = GetDevice()->createBindingSet(optSetDesc, m_iblOptimizerLayout);
-
-        nvrhi::ComputePipelineDesc cpDesc;
-        cpDesc.CS = m_iblOptimizerCS;
-        cpDesc.bindingLayouts = { m_iblOptimizerLayout };
-        m_iblOptimizerPipeline = GetDevice()->createComputePipeline(cpDesc);
-    }
-
-    m_iblTrainingStep = 0;
-    m_iblEpoch = 0;
-    m_iblReady = false;
-
-    log::info("IBL Sampler MLP training resources created: %d total params (%d bytes fp16)",
-              m_iblTotalParams, m_iblTotalParams * 2);
-}
-
-// =============================================================================
-// IBL Sampler MLP: Run one epoch of training
-// =============================================================================
-void SimpleInferencing::TrainIBLStep(nvrhi::ICommandList* cmdList)
-{
-    std::uniform_int_distribution<uint64_t> ldist;
-    uint64_t seed = ldist(m_rd);
-
-    uint4 trainWeightOffsets[IBL_NUM_TRANSITIONS_ALIGN4] = {};
-    uint4 trainBiasOffsets[IBL_NUM_TRANSITIONS_ALIGN4] = {};
-    for (int i = 0; i < IBL_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(trainWeightOffsets)[i] = m_iblDeviceLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(trainBiasOffsets)[i] = m_iblDeviceLayout.networkLayers[i].biasOffset;
-    }
-
-    for (int batch = 0; batch < IBL_BATCH_COUNT; ++batch)
-    {
-        ++m_iblTrainingStep;
-
-        IBLTrainingConstants trainConst = {};
-        for (int i = 0; i < IBL_NUM_TRANSITIONS_ALIGN4; ++i)
-        {
-            trainConst.weightOffsets[i] = trainWeightOffsets[i];
-            trainConst.biasOffsets[i] = trainBiasOffsets[i];
-        }
-        trainConst.maxParamSize = m_iblTotalParams;
-        trainConst.learningRate = IBL_LEARNING_RATE;
-        trainConst.currentStep = float(m_iblTrainingStep);
-        trainConst.batchSize = IBL_BATCH_SIZE;
-        trainConst.seed = seed + batch;
-
-        cmdList->writeBuffer(m_iblTrainingCB, &trainConst, sizeof(trainConst));
-
-        // Training dispatch — pure math, no cubemap binding
-        nvrhi::ComputeState trainState;
-        trainState.pipeline = m_iblTrainingPipeline;
-        trainState.bindings = { m_iblTrainingSet };
-        cmdList->setComputeState(trainState);
-        cmdList->dispatch(IBL_BATCH_SIZE / IBL_THREADS_PER_GROUP, 1, 1);
-
-        // Optimizer dispatch
-        nvrhi::ComputeState optState;
-        optState.pipeline = m_iblOptimizerPipeline;
-        optState.bindings = { m_iblOptimizerSet };
-        cmdList->setComputeState(optState);
-        cmdList->dispatch((m_iblTotalParams + IBL_THREADS_PER_GROUP_OPT - 1) / IBL_THREADS_PER_GROUP_OPT, 1, 1);
-    }
-}
-
-// =============================================================================
-// IBL Sampler MLP: Convert training weights to inferencing-optimal layout
-// =============================================================================
-void SimpleInferencing::ConvertIBLToInferencing()
-{
-    auto inferLayout = m_networkUtils->GetNewMatrixLayout(
-        m_iblNetwork->GetNetworkLayout(), rtxns::MatrixLayout::InferencingOptimal);
-
-    memset(m_iblWeightOffsets, 0, sizeof(m_iblWeightOffsets));
-    memset(m_iblBiasOffsets, 0, sizeof(m_iblBiasOffsets));
-    for (int i = 0; i < IBL_NUM_TRANSITIONS; ++i)
-    {
-        reinterpret_cast<uint32_t*>(m_iblWeightOffsets)[i] = inferLayout.networkLayers[i].weightOffset;
-        reinterpret_cast<uint32_t*>(m_iblBiasOffsets)[i] = inferLayout.networkLayers[i].biasOffset;
-    }
-
-    if (!m_iblMLPInferBuffer || m_iblMLPInferBuffer->getDesc().byteSize < inferLayout.networkByteSize)
-    {
-        nvrhi::BufferDesc bufDesc;
-        bufDesc.byteSize = inferLayout.networkByteSize;
-        bufDesc.canHaveRawViews = true;
-        bufDesc.canHaveUAVs = true;
-        bufDesc.debugName = "IBLMLPInferBuffer";
-        bufDesc.initialState = nvrhi::ResourceStates::UnorderedAccess;
-        bufDesc.keepInitialState = true;
-        m_iblMLPInferBuffer = GetDevice()->createBuffer(bufDesc);
-
-        nvrhi::BindingSetDesc setDesc;
-        setDesc.bindings = {
-            nvrhi::BindingSetItem::RawBuffer_SRV(0, m_iblMLPInferBuffer)
-        };
-        m_iblInferSet = GetDevice()->createBindingSet(setDesc, m_iblInferLayout);
-        m_pipeline = nullptr;
-    }
-
-    auto cmdList = GetDevice()->createCommandList();
-    cmdList->open();
-
-    cmdList->setBufferState(m_iblMLPInferBuffer, nvrhi::ResourceStates::UnorderedAccess);
-    cmdList->commitBarriers();
-
-    m_networkUtils->ConvertWeights(
-        m_iblDeviceLayout, inferLayout,
-        m_iblMLPDeviceBuffer, 0, m_iblMLPInferBuffer, 0,
-        GetDevice(), cmdList);
-
-    cmdList->setBufferState(m_iblMLPInferBuffer, nvrhi::ResourceStates::ShaderResource);
-    cmdList->commitBarriers();
-
-    cmdList->close();
-    GetDevice()->executeCommandList(cmdList);
-}

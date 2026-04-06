@@ -35,6 +35,8 @@
 #define UNIFIED_BATCH_COUNT 50
 #define UNIFIED_THREADS_PER_GROUP 64
 #define UNIFIED_THREADS_PER_GROUP_OPT 32
+// Maximum transitions align4 across all MLPs (used for generic training CB)
+#define MAX_TRANSITIONS_ALIGN4 2
 #define UNIFIED_LEARNING_RATE 0.001f
 #define UNIFIED_LOSS_SCALE 128.0
 
@@ -129,11 +131,12 @@ struct GpuMaterialParams
     int curvatureTexIdx; // Hijacked from GLTF clearcoat_texture
 };
 
-// Training constant buffer for unified MLP
-struct UnifiedTrainingConstants
+// Generic training constant buffer — used by ALL MLP training shaders
+// Uses MAX_TRANSITIONS_ALIGN4 so the layout is identical on CPU and GPU.
+struct GenericTrainingConstants
 {
-    uint4 weightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
-    uint4 biasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
+    uint4 weightOffsets[MAX_TRANSITIONS_ALIGN4];
+    uint4 biasOffsets[MAX_TRANSITIONS_ALIGN4];
 
     uint32_t maxParamSize;
     float learningRate;
@@ -144,19 +147,8 @@ struct UnifiedTrainingConstants
     uint2 _pad;
 };
 
-// Training constant buffer for IBL Sampler MLP
-struct IBLTrainingConstants
-{
-    uint4 weightOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
-    uint4 biasOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
-
-    uint32_t maxParamSize;
-    float learningRate;
-    float currentStep;
-    uint32_t batchSize;
-
-    uint64_t seed;
-    uint2 _pad;
-};
+// Aliases for backward compatibility (works in both C++ and Slang)
+#define UnifiedTrainingConstants GenericTrainingConstants
+#define IBLTrainingConstants GenericTrainingConstants
 
 #endif //__NETWORK_CONFIG_H__
