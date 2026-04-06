@@ -152,6 +152,14 @@ def render_live_preview(test_idx=0):
     
     base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
 
+    # 加载 sun_energy: MLP 输出是单位光强 transmittance，需要乘回 energy 才能和 GT 对比
+    sun_energy_file = os.path.join(data_dir, 'sun_energy.npy')
+    if os.path.exists(sun_energy_file):
+        sun_energy = np.load(sun_energy_file)[0]
+        print(f"已加载 Sun energy = {sun_energy}，MLP 输出将乘以此值以匹配 GT")
+    else:
+        sun_energy = 1.0
+
     def simple_aces(x):
         x = np.maximum(0, x - 0.004)
         return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06)
@@ -190,7 +198,8 @@ def render_live_preview(test_idx=0):
                             preds_hdr = torch.cat(preds, dim=0).cpu().numpy()
                         
                         preds_hdr = np.maximum(preds_hdr, 0.0)
-                        preds_rgb = preds_hdr * base_color
+                        # MLP 输出是单位光强 transmittance，乘回 sun_energy + base_color 以匹配 GT
+                        preds_rgb = preds_hdr * base_color * sun_energy
                         
                         for i, (py, px) in enumerate(batch_pixels):
                             img_pred[py, px] = preds_rgb[i]

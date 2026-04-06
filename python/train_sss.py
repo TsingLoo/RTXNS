@@ -135,6 +135,17 @@ X = np.concatenate(all_inputs, axis=0).astype(np.float32)
 Y = np.concatenate(all_targets, axis=0).astype(np.float32)
 print(f"总计提取 {len(X)} 个有效黄金训练像素。")
 
+# 光强归一化: 除以 Blender Sun energy，使 MLP 学习"单位光强下的 SSS 响应"
+# 渲染方程对光源辐照度是线性的: render(E) = E × render(1)
+# 所以 render(1) = render(E) / E
+sun_energy_file = os.path.join(data_dir, 'sun_energy.npy')
+if os.path.exists(sun_energy_file):
+    sun_energy = np.load(sun_energy_file)[0]
+    Y = Y / sun_energy
+    print(f"已除以 Sun energy = {sun_energy}，归一化为单位光强响应")
+else:
+    print("警告: 未找到 sun_energy.npy，跳过光强归一化（旧数据兼容模式）")
+
 # 颜色解耦: 网络学习 transmittance = RGB / base_color
 # 这样换色时只需替换 base_color，不用重新训练
 # SSS 的波长差异 (R/G/B 散射半径不同) 在 transmittance 中自然保留

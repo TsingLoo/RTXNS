@@ -165,15 +165,24 @@ np.save(os.path.join(output_dir, 'camera_pos.npy'), np.array(cam.location, dtype
 # ============================================
 light = bpy.data.objects.get('Light')
 if not light:
-    light_data = bpy.data.lights.new('Light', type='POINT')
+    light_data = bpy.data.lights.new('Light', type='SUN')
     light = bpy.data.objects.new('Light', light_data)
     scene.collection.objects.link(light)
 
-light.data.type = 'POINT'
-light.data.energy = 1000 * (size ** 2)
-# 完全关闭阴影！以保证只提取纯粹由厚度主导的局部 SSS 衰减，避免全局自遮挡产生的不可学习黑斑！
+# 使用 Sun Light (方向光) 而非 Point Light！
+# 原因：存储的全局 lightdir 必须等于每个像素的真实 L 方向
+# Point Light 每个像素 L 不同，但我们只存了一个全局方向 → 训练数据对不齐
+# Sun Light 全像素统一方向，完美匹配存储的 lightdir
+light.data.type = 'SUN'
+# 使用合理的光强保证渲染有良好的动态范围（峰值 RGB ≈ 0.3~1.0）
+# 训练时除以这个值来归一化 → MLP 学习单位光强下的 SSS 响应
+sun_energy = 10.0
+light.data.energy = sun_energy
+# 关闭阴影，只提取纯厚度主导的 SSS 衰减
 light.data.use_shadow = False
-light_radius = size * 3
+
+# 保存 sun_energy，供训练脚本归一化用
+np.save(os.path.join(output_dir, 'sun_energy.npy'), np.array([sun_energy], dtype=np.float32))
 
 def fibonacci_sphere(n):
     points = []
@@ -188,7 +197,10 @@ light_dirs = fibonacci_sphere(n_light_angles)
 
 print(f"开始渲染 {n_light_angles} 张去除高光纯净 SSS 的视角...")
 for idx, ld in enumerate(light_dirs):
-    light.location = center + ld * light_radius
+    # Sun Light 通过旋转设置方向，而非设置位置
+    # ld 是光源的照射目标方向（从光源到物体），Sun Light 的 rotation 控制方向
+    light_forward = -ld  # Sun Light 默认朝 -Z，我们要让它朝 -ld 方向照射
+    light.rotation_euler = light_forward.to_track_quat('-Z', 'Y').to_euler()
     scene.render.filepath = os.path.join(output_dir, f'render_{idx:04d}.exr')
     bpy.ops.render.render(write_still=True)
     np.save(os.path.join(output_dir, f'lightdir_{idx:04d}.npy'), np.array(ld, dtype=np.float32))
