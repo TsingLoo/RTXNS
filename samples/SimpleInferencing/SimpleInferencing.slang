@@ -259,8 +259,8 @@ void main_ps(
         uint matIdx = min(vOut.materialIndex, gConst.materialCount - 1);
         GpuMaterialParams mat = g_Materials[matIdx];
         
-        // Base color: factor * texture
-        baseColor = mat.baseColor;
+        // Base color: UI color * texture (Forced override)
+        baseColor = gConst.baseColor;
         float4 baseColorTex = SampleMaterialTexture(mat.baseColorTexIdx, vOut.uv);
         baseColor *= baseColorTex;
         

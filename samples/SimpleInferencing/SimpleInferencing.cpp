@@ -475,7 +475,7 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     modelConstant.cameraPos = { camPos.x, camPos.y, camPos.z, 0 };
     modelConstant.lightDir = float4(normalize(m_userInterfaceParameters->lightDir), 1.f);
     modelConstant.lightIntensity = float4(m_userInterfaceParameters->lightIntensity);
-    modelConstant.baseColor = float4(.82f, .67f, .16f, 1.f);
+    modelConstant.baseColor = m_userInterfaceParameters->baseColor;
     modelConstant.specular = m_userInterfaceParameters->specular;
     modelConstant.roughness = m_userInterfaceParameters->roughness;
     modelConstant.metallic = m_userInterfaceParameters->metallic;

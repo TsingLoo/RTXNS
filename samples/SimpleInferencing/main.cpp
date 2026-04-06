@@ -29,7 +29,8 @@ int main(int __argc, const char** __argv)
     std::unique_ptr<app::DeviceManager> deviceManager(app::DeviceManager::Create(graphicsApi));
 
     app::DeviceCreationParameters deviceParams;
-    deviceParams.backBufferWidth = deviceParams.backBufferHeight;
+    deviceParams.backBufferWidth = 1920;
+    deviceParams.backBufferHeight = 1080;
     deviceParams.depthBufferFormat = nvrhi::Format::D24S8;
 
 #ifdef _DEBUG

@@ -42,6 +42,7 @@ void UserInterface::buildUI()
     ImGui::SliderFloat("Specular", &m_userInterfaceParameters->specular, 0.f, 1.f);
     ImGui::SliderFloat("Roughness", &m_userInterfaceParameters->roughness, 0.0f, 1.f);
     ImGui::SliderFloat("Metallic", &m_userInterfaceParameters->metallic, 0.f, 1.f);
+    ImGui::ColorEdit4("Base Color", &m_userInterfaceParameters->baseColor.x);
     // Legacy Disney shader removed to prevent confusion
     // ImGui::Checkbox("Enable Neural Shading (Disney)", &m_userInterfaceParameters->enableNeuralShading);
     
