@@ -12,7 +12,7 @@ import cv2
 # 0. 数据路径与辅助函数 (按需修改路径)
 # =========================================
 data_dir = "c:/tmp/jade_sss_data/"
-INPUT_DIM = 11
+INPUT_DIM = 12
 
 def load_exr_channels(filepath, channels=('R', 'G', 'B', 'A')):
     os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
@@ -131,6 +131,16 @@ def render_live_preview(test_idx=0):
             NdotL = np.dot(normal, L)
             NdotV = max(np.dot(normal, V), 0.0)
             VdotL = np.dot(V, L)
+            
+            # SSS-GGX-MLP: Half Vector for specular
+            H = V + L
+            H_len = np.linalg.norm(H)
+            if H_len < 1e-8:
+                NdotH = 0.0
+            else:
+                H = H / H_len
+                NdotH = max(np.dot(normal, H), 0.0)
+            
             thick = thickness_map[y, x]
             ao = ao_map[y, x]
             curv = curvature_map[y, x]
@@ -142,7 +152,7 @@ def render_live_preview(test_idx=0):
             thin_backlight = (1.0 - thick) * max(-NdotL, 0.0)
             fresnel = (1.0 - NdotV) ** 5.0
             
-            feat = [NdotL, NdotV, VdotL, thick, ao, curv,
+            feat = [NdotL, NdotV, NdotH, VdotL, thick, ao, curv,
                     wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel]
             batch_features.append(feat)
             batch_pixels.append((y, x))

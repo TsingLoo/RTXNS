@@ -153,7 +153,7 @@ float4 Disney(float NdotL, float NdotV, float NdotH, float LdotH, float roughnes
 // Residual skip connections are fused into exported weights (W_eff = W + I),
 // so inference remains a simple sequential feedforward pass.
 // =============================================================================
-void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
+void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL, float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
 {
     // Compute 5 SSS-physics-informed features from existing inputs
     float wrap_lighting = saturate(NdotL * 0.5 + 0.5);
@@ -163,7 +163,7 @@ void UnifiedMLP(float NdotL, float NdotV, float VdotL, float thickness, float ao
     float fresnel = pow(1.0 - NdotV, 5.0);
 
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, VdotL, thickness, ao, curvature,
+        NdotL, NdotV, NdotH, VdotL, thickness, ao, curvature,
         wrap_lighting, transmission_feat, forward_scatter, thin_backlight, fresnel
     };
 
@@ -377,65 +377,25 @@ void main_ps(
     
     if (gConst.enableNeuralIBL != 0 && isNeuralTarget)
     {
-        // UNIVERSAL MLP: perfectly replaces rendering logic predicting the pure RGB
+        // =====================================================================
+        // SSS-GGX-MLP: One MLP predicts the COMPLETE directional shading
+        // (SSS diffuse + GGX specular combined) — no analytical specular math!
+        // =====================================================================
         float mlpResults[UNIFIED_OUTPUT_NEURONS];
         
-        UnifiedMLP(NdotL, NdotV, VdotL, thickness, ao, curvature, mlpResults);
+        UnifiedMLP(NdotL, NdotV, NdotH, VdotL, thickness, ao, curvature, mlpResults);
         
-        // Output from MLP is unit-intensity SSS transmittance (trained with Sun energy=1.0).
-        // Multiply by base color to get the material-colored SSS response.
-        float3 hdrTransmittance = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
-        float3 neuralDiffuse = hdrTransmittance * baseColor.rgb; 
+        // MLP output = unit-intensity complete shading response (SSS + specular baked in).
+        // Multiply by base color and light intensity to get final directional contribution.
+        float3 hdrShading = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
+        float3 neuralDirectional = hdrShading * baseColor.rgb * gConst.lightIntensity.rgb;
         
-        // Scale purely by user light intensity — NO ambient floor.
-        // When lightIntensity=0, directional SSS should be zero (environment light handled by IBL).
-        neuralDiffuse *= gConst.lightIntensity.rgb;
-        
-        // -------------------------------------------------------------
-        // THE GOLDEN RULE OF NEURAL RENDERING: Neural Diffuse + Physical Specular
-        // -------------------------------------------------------------
-        // We use the Neural Network's prediction purely as the "Subsurface DiffuseBase".
-        // Now we calculate the exact same mathematical sharp SPECULAR highlight as the engine uses!
-        
-        // Directional Light Specular (Microfacet BRDF math)
-        // Specular only exists when the surface faces the light (NdotL > 0).
-        // The neural MLP handles back-scattering through its SSS diffuse output.
-        float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
-        float specNdotL = max(NdotL, 0.0);
-        float3 analyticalSpecular = float3(0, 0, 0);
-        
-        if (specNdotL > 1e-5f)
-        {
-            float3 V_dir = view;
-            float3 L_dir = normalize(-lightDir.xyz);
-            float3 H = normalize(V_dir + L_dir);
-            float NdotH_spec = saturate(dot(N, H));
-            float LdotH_spec = saturate(dot(L_dir, H));
-            
-            float a = roughness * roughness;
-            float a2 = a * a;
-            float d = (NdotH_spec * NdotH_spec) * (a2 - 1.0) + 1.0;
-            float D = a2 / (3.14159265 * d * d);
-            
-            float k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
-            float GV = NdotV / (NdotV * (1.0 - k) + k);
-            float GL = specNdotL / (specNdotL * (1.0 - k) + k);
-            float G = GV * GL;
-            
-            float3 F = F0 + (1.0 - F0) * pow(1.0 - LdotH_spec, 5.0);
-            
-            float3 specularTerm = (D * G * F) / max(4.0 * NdotV * specNdotL, 0.001) * specNdotL;
-            analyticalSpecular = specularTerm * gConst.lightIntensity.rgb * 3.14159f;
-        }
-        
-        // Combine: neural SSS diffuse + physical specular (both scaled by directional light)
-        float3 finalColor = neuralDiffuse + analyticalSpecular;
+        float3 finalColor = neuralDirectional;
         
         // ----- IBL (Environment lighting) — independent of directional light -----
-        // This provides ambient illumination so the object isn't black when lightIntensity=0.
+        float3 F0 = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
         
-        // IBL Diffuse: ambient SSS/diffuse lighting from environment irradiance
-        // Same logic as non-neural path: kD * baseColor * irradiance * ao
+        // IBL Diffuse: ambient lighting from environment irradiance
         float3 fresnelRoughness_n = F0 + (max(float3(1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
         float3 kD_n = (1.0 - fresnelRoughness_n) * (1.0 - metallic);
         float3 Cdlin_n = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));

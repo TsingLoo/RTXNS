@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # =========================================
 # 1. 网络结构（残差 + SSS 特征）
 # =========================================
-INPUT_DIM = 11  # NdotL, NdotV, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+INPUT_DIM = 12  # NdotL, NdotV, NdotH, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
 
 class NeuralSSS(nn.Module):
     def __init__(self):
@@ -115,6 +115,12 @@ for idx in range(n_renders):
     NdotV = np.maximum(np.sum(norm * V, axis=-1), 0.0)
     VdotL = np.sum(V * L, axis=-1)
     
+    # SSS-GGX-MLP: 计算 Half Vector 和 NdotH，让 MLP 学习 GGX 高光峰
+    H = V + L  # broadcast: L is (3,), V is (N, 3)
+    H_len = np.linalg.norm(H, axis=-1, keepdims=True)
+    H = H / np.maximum(H_len, 1e-8)
+    NdotH = np.maximum(np.sum(norm * H, axis=-1), 0.0)
+    
     # ======== SSS 专属特征 ========
     wrap_lighting = np.clip(NdotL * 0.5 + 0.5, 0.0, 1.0)
     transmission = np.exp(-thick * 3.0) * np.maximum(-NdotL, 0.0)
@@ -123,7 +129,7 @@ for idx in range(n_renders):
     fresnel = np.power(1.0 - NdotV, 5.0)  # Schlick 菲涅尔，编码润泽边缘光
     
     inputs_batch = np.stack([
-        NdotL, NdotV, VdotL, thick, ao, curv,
+        NdotL, NdotV, NdotH, VdotL, thick, ao, curv,
         wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel
     ], axis=-1)
     

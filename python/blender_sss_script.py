@@ -127,14 +127,15 @@ bsdf.inputs['Subsurface Weight'].default_value = 1.0
 bsdf.inputs['Subsurface Scale'].default_value = size * 0.15
 bsdf.inputs['Subsurface Radius'].default_value = (0.8, 1.2, 0.5)
 
-# 🛑 最核心改动：物理级阉割所有高光，只让它渲染通透的 SSS 漫反射底盘
+# SSS-GGX-MLP: 保留完整的 SSS + GGX 高光，让 MLP 一次性学完整的着色响应
+# 不再阉割 Specular！这样渲染数据包含 SSS 漫反射 + GGX 镜面反射
 if 'Specular IOR Level' in bsdf.inputs:
-    bsdf.inputs['Specular IOR Level'].default_value = 0.0
+    bsdf.inputs['Specular IOR Level'].default_value = 0.5  # 玉石标准 IOR 对应的 specular level
 elif 'Specular' in bsdf.inputs:
-    bsdf.inputs['Specular'].default_value = 0.0
+    bsdf.inputs['Specular'].default_value = 0.5
 
 if 'Roughness' in bsdf.inputs:
-    bsdf.inputs['Roughness'].default_value = 1.0
+    bsdf.inputs['Roughness'].default_value = 0.4  # 玉石级粗糙度，保留锐利的 GGX 高光
 
 scene.cycles.samples = cycles_samples
 scene.cycles.use_denoising = True

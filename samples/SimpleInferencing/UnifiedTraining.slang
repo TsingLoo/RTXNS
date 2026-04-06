@@ -158,8 +158,16 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     ComputeGroundTruth(NdotL, NdotV, NdotH, LdotH, VdotL, thickness, roughness, groundTruth);
 
     // --- MLP forward pass ---
+    // SSS-GGX-MLP: 12 features = NdotL, NdotV, NdotH, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+    float wrap_l = saturate(NdotL * 0.5 + 0.5);
+    float trans_feat = exp(-thickness * 3.0) * max(-NdotL, 0.0);
+    float fwd_scatter = pow(max(VdotL, 0.0), 4.0);
+    float thin_bl = (1.0 - thickness) * max(-NdotL, 0.0);
+    float fresnel_f = pow(1.0 - NdotV, 5.0);
+    
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, VdotL, thickness, 1.0f, 0.0f
+        NdotL, NdotV, NdotH, VdotL, thickness, 1.0f, 0.0f,
+        wrap_l, trans_feat, fwd_scatter, thin_bl, fresnel_f
     };
     
     CoopVec<half, UNIFIED_INPUT_NEURONS> inputParams = CoopVec<half, UNIFIED_INPUT_NEURONS>((half)0.0);
