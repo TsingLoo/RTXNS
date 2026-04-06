@@ -175,7 +175,7 @@ Y_norm = Y / (base_color + 1e-6)
 # 当网络去学习这部分时，自然会给出更强烈的透射感。
 # X[:, 0] 是 NdotL。
 # max_boost=2.0 意味着在完全背光时 (-NdotL=1)，网络的目标被放大了 1+2.0=3.0 倍。
-artificial_sss_boost = 1.0 
+artificial_sss_boost = - 0.1
 sss_enhance = 1.0 + artificial_sss_boost * np.maximum(-X[:, 0], 0.0)
 Y_norm = Y_norm * sss_enhance[:, None]
 print(f"已应用背光艺术增强 (Artifical SSS Boost) 提升透光感！最大增强倍数: {1.0+artificial_sss_boost}x")
@@ -221,15 +221,17 @@ except Exception as e:
 # =========================================
 # SSS-Aware Loss: 同时兼顾暗部精度和亮部通透感
 # =========================================
-# Blender SSS Radius (0.8, 1.2, 0.5) → 通道重要性权重
-sss_radius = torch.tensor([0.8, 1.2, 0.5], device='cuda', dtype=torch.float32)
-sss_channel_weight = sss_radius / sss_radius.max()  # [0.667, 1.0, 0.417]
+# 通道权重: 补偿 base_color 除法造成的梯度不均衡
+# base_color = [0.28, 0.58, 0.22] → 除法后 G 通道值最小、梯度最大
+# 为了均衡，给值被放大更多的通道(R,B)更高权重，抵消 log 空间的梯度衰减
+_base_color_t = torch.tensor([0.28, 0.58, 0.22], device='cuda', dtype=torch.float32)
+_inv_base = 1.0 / _base_color_t  # [3.57, 1.72, 4.55] — 放大倍率
+sss_channel_weight = _inv_base / _inv_base.sum() * 3.0  # 归一化后 × 3 保持总权重不变
+# 结果 ≈ [1.09, 0.53, 1.38] — B 最高、G 最低，正好补偿 base_color 除法的不均衡
+print(f"通道均衡权重: R={sss_channel_weight[0]:.3f}, G={sss_channel_weight[1]:.3f}, B={sss_channel_weight[2]:.3f}")
 
 def sss_aware_loss(pred, target):
     # 使用 Log-Space (对数空间) 进行监督，解决直接受光面压制暗部 SSS 细节的问题。
-    # 为了避免预测值为负数导致 log1p 丢出 NaN 爆炸，需要对 pred 进行保护。
-    # 我们用 torch.clamp 保护对数域输入，由于下方有线性的差值约束 (diff_lin)，
-    # 负预测依然会吃到拉升向上的梯度，绝不会被困住死锁。
     scale = 10.0 # 增强暗部梯度区分度
     pred_safe = torch.clamp(pred, min=0.0)
     
@@ -242,13 +244,19 @@ def sss_aware_loss(pred, target):
     # 1. 对数 L1：核心误差，使网络平等对待暗部与亮部的相对差异
     l1_log = torch.mean(torch.abs(diff_log) * sss_channel_weight)
     
-    # 2. 对数 MSE：惩罚巨大的相对误差（如网络没预测出应该有的暗部高亮）
+    # 2. 对数 MSE：惩罚巨大的相对误差
     mse_log = torch.mean(diff_log ** 2 * sss_channel_weight)
     
-    # 3. 线性 L1：保留少量的线性误差，保证在极端高光（且保护最初可能为负时）能持续提供梯度
+    # 3. 线性 L1：保留少量的线性误差，保证极端情况能持续提供梯度
     l1_lin = torch.mean(torch.abs(diff_lin) * sss_channel_weight) * 0.2
     
-    return l1_log + mse_log + l1_lin
+    # 4. 亮度偏高惩罚 (Asymmetric Penalty):
+    #    log 空间天然对过亮惩罚弱于过暗 → 网络倾向"宁可偏亮"。
+    #    额外对 diff_log > 0 (预测偏高) 的部分施加二次惩罚来修正。
+    over_bright = torch.clamp(diff_log, min=0.0)  # 只取偏高部分
+    over_bright_penalty = torch.mean(over_bright ** 2 * sss_channel_weight) * 0.15
+    
+    return l1_log + mse_log + l1_lin + over_bright_penalty
 
 
 import json

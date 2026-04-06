@@ -414,7 +414,7 @@ void SimpleInferencing::Animate(float seconds)
     {
         if (m_unifiedTrainingActive)
             m_extraStatus = std::format(" - Neural - {:3d}us - Training epoch {} loss {:.4f}", t, m_unifiedEpoch, 0.0f);
-        else if (m_userInterfaceParameters->enableNeuralIBL && m_unifiedReady)
+        else if (m_userInterfaceParameters->enableNeuralSSS && m_unifiedReady)
             m_extraStatus = std::format(" - Unified MLP - {:3d}us", t);
         else
             m_extraStatus = std::format(" - Neural - {:3d}us", t);
@@ -485,8 +485,7 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     modelConstant.usePerVertexMaterial = m_hasPerVertexMaterials ? 1u : 0u;
     modelConstant.materialCount = m_materialCount;
     modelConstant.textureCount = m_textureCount;
-    modelConstant.enableNeuralIBL = (m_userInterfaceParameters->enableNeuralIBL && m_unifiedReady) ? 1u : 0u;
-    modelConstant.enableIBL = m_userInterfaceParameters->enableIBL ? 1u : 0u;
+    modelConstant.enableNeuralSSS = (m_userInterfaceParameters->enableNeuralSSS && m_unifiedReady) ? 1u : 0u;
     for (int i = 0; i < UNIFIED_NUM_TRANSITIONS_ALIGN4; ++i)
     {
         modelConstant.uniWeightOffsets[i] = m_unifiedWeightOffsets[i];

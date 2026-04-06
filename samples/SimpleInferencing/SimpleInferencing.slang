@@ -363,23 +363,15 @@ void main_ps(
     float3 R = reflect(-view, N);
     const float MAX_REFLECTION_LOD = 10.0;
     
-    if (gConst.enableIBL != 0)
-    {
-        // Diffuse
-        iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
-        
-        // Specular
-        float lod = roughness * MAX_REFLECTION_LOD;
-        iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
-        if (roughness < 0.04) {
-            float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
-            iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
-        }
-    }
-    else
-    {
-        iblDiffuse = float3(0, 0, 0);
-        iblSpecular = float3(0, 0, 0);
+    // Diffuse
+    iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
+    
+    // Specular
+    float lod = roughness * MAX_REFLECTION_LOD;
+    iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
+    if (roughness < 0.04) {
+        float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
+        iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
     }
 
     // ---- Check for unified neural shading mode ----
@@ -388,7 +380,7 @@ void main_ps(
     // Apply neural shading universally when enabled
     bool isNeuralTarget = true;
     
-    if (gConst.enableNeuralIBL != 0 && isNeuralTarget)
+    if (gConst.enableNeuralSSS != 0 && isNeuralTarget)
     {
         // =====================================================================
         // SSS-GGX-MLP: One MLP predicts the COMPLETE directional shading
@@ -400,8 +392,25 @@ void main_ps(
             thickness, ao, curvature, mlpResults);
         
         // MLP output = unit-intensity complete shading response (SSS + specular baked in).
-        // Multiply by base color and light intensity to get final directional contribution.
         float3 hdrShading = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
+        
+        // Hue-preserving highlight compression (Reinhard soft-knee on max channel).
+        // Problem: When transmittance is high (lit side), after base_color * lightIntensity
+        // multiplication, all RGB channels are large → ACES maps them all to ~1.0 → white/rubber.
+        // Fix: Compress only the intensity while keeping channel ratios (hue) identical.
+        // Values below 'knee' (e.g. backlit SSS) pass through completely unchanged.
+        {
+            const float knee = 1.5;       // Only compress peaks above this
+            const float shoulder = 0.3;    // Compression strength (higher = more compression)
+            float peak = max(max(hdrShading.r, hdrShading.g), hdrShading.b);
+            if (peak > knee) {
+                float excess = peak - knee;
+                float compressed = knee + excess / (1.0 + excess * shoulder);
+                hdrShading *= compressed / peak;
+            }
+        }
+        
+        // Multiply by base color and light intensity to get final directional contribution.
         float3 neuralDirectional = hdrShading * baseColor.rgb * gConst.lightIntensity.rgb;
         
         float3 finalColor = neuralDirectional;

@@ -49,8 +49,7 @@ void UserInterface::buildUI()
     ImGui::Separator();
     ImGui::Text("--- Neural Jade SSS (Offline) ---");
     
-    ImGui::Checkbox("Enable Neural SSS Render", &m_userInterfaceParameters->enableNeuralIBL);
-    ImGui::Checkbox("Enable IBL Effect", &m_userInterfaceParameters->enableIBL);
+    ImGui::Checkbox("Enable Neural SSS Render", &m_userInterfaceParameters->enableNeuralSSS);
 
     if (ImGui::Button("Load SSS Weights (JSON)"))
     {
