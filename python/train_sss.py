@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # =========================================
 # 1. 网络结构（残差 + SSS 特征）
 # =========================================
-INPUT_DIM = 12  # NdotL, NdotV, NdotH, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+INPUT_DIM = 15  # NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
 
 class NeuralSSS(nn.Module):
     def __init__(self):
@@ -75,6 +75,14 @@ for idx in range(n_renders):
     light_dir = np.load(os.path.join(data_dir, f'lightdir_{idx:04d}.npy'))
     L = light_dir / (np.linalg.norm(light_dir) + 1e-8)
     
+    # 加载材质参数 (SSS-GGX-MLP: 每张渲染可能有不同的 roughness/metallic/specular)
+    mat_path = os.path.join(data_dir, f'matparams_{idx:04d}.npy')
+    if os.path.exists(mat_path):
+        mat_params = np.load(mat_path)  # [roughness, metallic, specular]
+        render_roughness, render_metallic, render_specular = mat_params
+    else:
+        render_roughness, render_metallic, render_specular = 0.4, 0.0, 0.5  # 默认值
+    
     h, w = render_rgba.shape[:2]
     
     # 向量化处理以极大加速拼接
@@ -129,7 +137,11 @@ for idx in range(n_renders):
     fresnel = np.power(1.0 - NdotV, 5.0)  # Schlick 菲涅尔，编码润泽边缘光
     
     inputs_batch = np.stack([
-        NdotL, NdotV, NdotH, VdotL, thick, ao, curv,
+        NdotL, NdotV, NdotH, VdotL,
+        np.full_like(NdotL, render_roughness),
+        np.full_like(NdotL, render_metallic),
+        np.full_like(NdotL, render_specular),
+        thick, ao, curv,
         wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel
     ], axis=-1)
     

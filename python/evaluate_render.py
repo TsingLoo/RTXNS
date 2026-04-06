@@ -12,7 +12,7 @@ import cv2
 # 0. 数据路径与辅助函数 (按需修改路径)
 # =========================================
 data_dir = "c:/tmp/jade_sss_data/"
-INPUT_DIM = 12
+INPUT_DIM = 15
 
 def load_exr_channels(filepath, channels=('R', 'G', 'B', 'A')):
     os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "1"
@@ -61,6 +61,14 @@ def render_live_preview(test_idx=0):
     try:
         render_rgba = load_exr_channels(os.path.join(data_dir, f'render_{test_idx:04d}.exr'))
         light_dir = np.load(os.path.join(data_dir, f'lightdir_{test_idx:04d}.npy'))
+        
+        # 加载材质参数
+        mat_path = os.path.join(data_dir, f'matparams_{test_idx:04d}.npy')
+        if os.path.exists(mat_path):
+            mat_params = np.load(mat_path)
+            render_roughness, render_metallic, render_specular = mat_params
+        else:
+            render_roughness, render_metallic, render_specular = 0.4, 0.0, 0.5
         
         def safe_load_exr(file_base):
             path = os.path.join(data_dir, f'{file_base}_{test_idx:04d}.exr')
@@ -152,7 +160,9 @@ def render_live_preview(test_idx=0):
             thin_backlight = (1.0 - thick) * max(-NdotL, 0.0)
             fresnel = (1.0 - NdotV) ** 5.0
             
-            feat = [NdotL, NdotV, NdotH, VdotL, thick, ao, curv,
+            feat = [NdotL, NdotV, NdotH, VdotL,
+                    render_roughness, render_metallic, render_specular,
+                    thick, ao, curv,
                     wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel]
             batch_features.append(feat)
             batch_pixels.append((y, x))

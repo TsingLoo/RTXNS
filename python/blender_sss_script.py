@@ -196,15 +196,58 @@ def fibonacci_sphere(n):
 
 light_dirs = fibonacci_sphere(n_light_angles)
 
-print(f"开始渲染 {n_light_angles} 张去除高光纯净 SSS 的视角...")
+# SSS-GGX-MLP: 每个光方向渲染多组材质变体 (roughness, metallic, specular)
+# 总渲染数 = n_light_angles × n_material_variants
+n_material_variants = 3  # 每个光方向渲染 3 种材质配置
+total_renders = n_light_angles * n_material_variants
+
+import random
+random.seed(42)  # 可复现的随机材质参数
+
+# 获取 BSDF 节点引用（用于动态修改材质）
+mat = bpy.data.objects[obj_name].data.materials[0]
+bsdf = None
+for node in mat.node_tree.nodes:
+    if node.type == 'BSDF_PRINCIPLED':
+        bsdf = node
+        break
+
+print(f"开始渲染 {total_renders} 张 SSS+GGX 数据 ({n_light_angles} 光方向 × {n_material_variants} 材质变体)...")
+render_idx = 0
 for idx, ld in enumerate(light_dirs):
-    # Sun Light 通过旋转设置方向，而非设置位置
-    # ld 是光源的照射目标方向（从光源到物体），Sun Light 的 rotation 控制方向
-    light_forward = -ld  # Sun Light 默认朝 -Z，我们要让它朝 -ld 方向照射
+    # 设置光方向
+    light_forward = -ld
     light.rotation_euler = light_forward.to_track_quat('-Z', 'Y').to_euler()
-    scene.render.filepath = os.path.join(output_dir, f'render_{idx:04d}.exr')
-    bpy.ops.render.render(write_still=True)
-    np.save(os.path.join(output_dir, f'lightdir_{idx:04d}.npy'), np.array(ld, dtype=np.float32))
+    
+    for mat_var in range(n_material_variants):
+        # 随机材质参数
+        r_roughness = random.uniform(0.1, 0.9)
+        r_metallic = random.uniform(0.0, 0.8)
+        r_specular = random.uniform(0.3, 0.7)
+        
+        # 应用到 Blender BSDF
+        if 'Roughness' in bsdf.inputs:
+            bsdf.inputs['Roughness'].default_value = r_roughness
+        if 'Metallic' in bsdf.inputs:
+            bsdf.inputs['Metallic'].default_value = r_metallic
+        if 'Specular IOR Level' in bsdf.inputs:
+            bsdf.inputs['Specular IOR Level'].default_value = r_specular
+        elif 'Specular' in bsdf.inputs:
+            bsdf.inputs['Specular'].default_value = r_specular
+        
+        scene.render.filepath = os.path.join(output_dir, f'render_{render_idx:04d}.exr')
+        bpy.ops.render.render(write_still=True)
+        np.save(os.path.join(output_dir, f'lightdir_{render_idx:04d}.npy'), np.array(ld, dtype=np.float32))
+        np.save(os.path.join(output_dir, f'matparams_{render_idx:04d}.npy'),
+                np.array([r_roughness, r_metallic, r_specular], dtype=np.float32))
+        
+        print(f"  [{render_idx+1}/{total_renders}] light={idx}, rough={r_roughness:.2f}, metal={r_metallic:.2f}, spec={r_specular:.2f}")
+        render_idx += 1
+
+# 恢复默认材质（用于几何 map 渲染）
+if bsdf:
+    if 'Roughness' in bsdf.inputs: bsdf.inputs['Roughness'].default_value = 0.4
+    if 'Metallic' in bsdf.inputs: bsdf.inputs['Metallic'].default_value = 0.0
 
 # ============================================
 # 5. 输出附带的 Position Map (平滑)

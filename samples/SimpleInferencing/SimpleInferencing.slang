@@ -153,7 +153,9 @@ float4 Disney(float NdotL, float NdotV, float NdotH, float LdotH, float roughnes
 // Residual skip connections are fused into exported weights (W_eff = W + I),
 // so inference remains a simple sequential feedforward pass.
 // =============================================================================
-void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL, float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
+void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
+    float roughness, float metallic, float specularParam,
+    float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
 {
     // Compute 5 SSS-physics-informed features from existing inputs
     float wrap_lighting = saturate(NdotL * 0.5 + 0.5);
@@ -163,7 +165,8 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL, float thickn
     float fresnel = pow(1.0 - NdotV, 5.0);
 
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, NdotH, VdotL, thickness, ao, curvature,
+        NdotL, NdotV, NdotH, VdotL, roughness, metallic, specularParam,
+        thickness, ao, curvature,
         wrap_lighting, transmission_feat, forward_scatter, thin_backlight, fresnel
     };
 
@@ -383,7 +386,8 @@ void main_ps(
         // =====================================================================
         float mlpResults[UNIFIED_OUTPUT_NEURONS];
         
-        UnifiedMLP(NdotL, NdotV, NdotH, VdotL, thickness, ao, curvature, mlpResults);
+        UnifiedMLP(NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular,
+            thickness, ao, curvature, mlpResults);
         
         // MLP output = unit-intensity complete shading response (SSS + specular baked in).
         // Multiply by base color and light intensity to get final directional contribution.

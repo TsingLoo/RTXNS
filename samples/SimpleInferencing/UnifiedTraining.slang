@@ -158,7 +158,10 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     ComputeGroundTruth(NdotL, NdotV, NdotH, LdotH, VdotL, thickness, roughness, groundTruth);
 
     // --- MLP forward pass ---
-    // SSS-GGX-MLP: 12 features = NdotL, NdotV, NdotH, VdotL, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+    // SSS-GGX-MLP: 15 features = NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular,
+    //               thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+    float metallic_r = rng.nextFloat();  // random metallic [0, 1]
+    float specular_r = rng.nextFloat() * 0.5 + 0.25; // random specular [0.25, 0.75]
     float wrap_l = saturate(NdotL * 0.5 + 0.5);
     float trans_feat = exp(-thickness * 3.0) * max(-NdotL, 0.0);
     float fwd_scatter = pow(max(VdotL, 0.0), 4.0);
@@ -166,7 +169,8 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
     float fresnel_f = pow(1.0 - NdotV, 5.0);
     
     float params[UNIFIED_INPUT_FEATURES] = {
-        NdotL, NdotV, NdotH, VdotL, thickness, 1.0f, 0.0f,
+        NdotL, NdotV, NdotH, VdotL, roughness, metallic_r, specular_r,
+        thickness, 1.0f, 0.0f,
         wrap_l, trans_feat, fwd_scatter, thin_bl, fresnel_f
     };
     
