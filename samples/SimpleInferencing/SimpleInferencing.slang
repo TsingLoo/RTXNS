@@ -363,15 +363,23 @@ void main_ps(
     float3 R = reflect(-view, N);
     const float MAX_REFLECTION_LOD = 10.0;
     
-    // Diffuse
-    iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
-    
-    // Specular
-    float lod = roughness * MAX_REFLECTION_LOD;
-    iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
-    if (roughness < 0.04) {
-        float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
-        iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
+    if (gConst.enableIBL != 0)
+    {
+        // Diffuse
+        iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
+        
+        // Specular
+        float lod = roughness * MAX_REFLECTION_LOD;
+        iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
+        if (roughness < 0.04) {
+            float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
+            iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
+        }
+    }
+    else
+    {
+        iblDiffuse = float3(0, 0, 0);
+        iblSpecular = float3(0, 0, 0);
     }
 
     // ---- Check for unified neural shading mode ----

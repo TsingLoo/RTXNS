@@ -170,6 +170,16 @@ else:
 base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
 Y_norm = Y / (base_color + 1e-6)
 
+# [艺术夸张策略]: 物理上厚物体的背光 SSS 本来就很暗。
+# 我们可以人为提亮训练目标中的“背光面 (NdotL < 0)”颜色的亮度。
+# 当网络去学习这部分时，自然会给出更强烈的透射感。
+# X[:, 0] 是 NdotL。
+# max_boost=2.0 意味着在完全背光时 (-NdotL=1)，网络的目标被放大了 1+2.0=3.0 倍。
+artificial_sss_boost = 1.0 
+sss_enhance = 1.0 + artificial_sss_boost * np.maximum(-X[:, 0], 0.0)
+Y_norm = Y_norm * sss_enhance[:, None]
+print(f"已应用背光艺术增强 (Artifical SSS Boost) 提升透光感！最大增强倍数: {1.0+artificial_sss_boost}x")
+
 # 90/10 划分 train/val
 n = len(X)
 perm = np.random.RandomState(42).permutation(n)
@@ -216,21 +226,29 @@ sss_radius = torch.tensor([0.8, 1.2, 0.5], device='cuda', dtype=torch.float32)
 sss_channel_weight = sss_radius / sss_radius.max()  # [0.667, 1.0, 0.417]
 
 def sss_aware_loss(pred, target):
-    diff = pred - target
+    # 使用 Log-Space (对数空间) 进行监督，解决直接受光面压制暗部 SSS 细节的问题。
+    # 为了避免预测值为负数导致 log1p 丢出 NaN 爆炸，需要对 pred 进行保护。
+    # 我们用 torch.clamp 保护对数域输入，由于下方有线性的差值约束 (diff_lin)，
+    # 负预测依然会吃到拉升向上的梯度，绝不会被困住死锁。
+    scale = 10.0 # 增强暗部梯度区分度
+    pred_safe = torch.clamp(pred, min=0.0)
     
-    # 1. L1: 线性空间，不做任何压缩，保留完整动态范围
-    l1 = torch.mean(torch.abs(diff) * sss_channel_weight)
+    pred_log = torch.log1p(pred_safe * scale)
+    target_log = torch.log1p(target * scale)
     
-    # 2. MSE: 平方误差对大偏差（暗部偏亮 + 亮部偏暗）施加更强惩罚
-    mse = torch.mean(diff ** 2 * sss_channel_weight)
+    diff_log = pred_log - target_log
+    diff_lin = pred - target
     
-    # 3. 对比度项：显式惩罚"该暗不暗"和"该亮不亮"
-    #    暗部 (target < 0.02): pred 偏高时额外惩罚 (raw RGB scale)
-    dark_penalty = torch.mean(torch.clamp(pred - 0.02, min=0.0) * (target < 0.02).float())
-    #    亮部通透区 (target > 0.3): pred 偏低时额外惩罚  
-    bright_penalty = torch.mean(torch.clamp(0.2 - pred, min=0.0) * (target > 0.3).float())
+    # 1. 对数 L1：核心误差，使网络平等对待暗部与亮部的相对差异
+    l1_log = torch.mean(torch.abs(diff_log) * sss_channel_weight)
     
-    return l1 + mse + 0.5 * (dark_penalty + bright_penalty)
+    # 2. 对数 MSE：惩罚巨大的相对误差（如网络没预测出应该有的暗部高亮）
+    mse_log = torch.mean(diff_log ** 2 * sss_channel_weight)
+    
+    # 3. 线性 L1：保留少量的线性误差，保证在极端高光（且保护最初可能为负时）能持续提供梯度
+    l1_lin = torch.mean(torch.abs(diff_lin) * sss_channel_weight) * 0.2
+    
+    return l1_log + mse_log + l1_lin
 
 
 import json

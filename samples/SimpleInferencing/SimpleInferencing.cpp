@@ -486,6 +486,7 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     modelConstant.materialCount = m_materialCount;
     modelConstant.textureCount = m_textureCount;
     modelConstant.enableNeuralIBL = (m_userInterfaceParameters->enableNeuralIBL && m_unifiedReady) ? 1u : 0u;
+    modelConstant.enableIBL = m_userInterfaceParameters->enableIBL ? 1u : 0u;
     for (int i = 0; i < UNIFIED_NUM_TRANSITIONS_ALIGN4; ++i)
     {
         modelConstant.uniWeightOffsets[i] = m_unifiedWeightOffsets[i];

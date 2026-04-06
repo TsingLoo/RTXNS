@@ -72,6 +72,8 @@ struct NeuralConstants
 
     // Unified neural shading (Disney + IBL baked)
     uint enableNeuralIBL;
+    uint enableIBL;
+    uint2 _pad0;
     uint4 uniWeightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
     uint4 uniBiasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
 };

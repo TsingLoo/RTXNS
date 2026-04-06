@@ -11,5 +11,6 @@ struct UIData
     donut::math::float4 baseColor = { 0.82f, 0.67f, 0.16f, 1.f };
     bool enableNeuralShading = true;
     bool enableNeuralIBL = false;  // Use unified MLP instead of cubemap IBL
+    bool enableIBL = true;         // Toggle IBL effect
     bool trainUnified = false;     // Start/stop unified MLP training
 };
