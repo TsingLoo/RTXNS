@@ -140,4 +140,49 @@ private:
     void CreateUnifiedTrainingResources();
     void TrainUnifiedStep(nvrhi::ICommandList* cmdList);
     void ConvertUnifiedToInferencing();
+
+    // ===== IBL Sampler MLP (learns GGX importance sampling directions + LOD) =====
+    // Network
+    std::unique_ptr<rtxns::HostNetwork> m_iblNetwork;
+    rtxns::NetworkLayout m_iblDeviceLayout;
+    donut::math::uint4 m_iblWeightOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
+    donut::math::uint4 m_iblBiasOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
+
+    // GPU buffers
+    nvrhi::BufferHandle m_iblMLPHostBuffer;
+    nvrhi::BufferHandle m_iblMLPDeviceBuffer;
+    nvrhi::BufferHandle m_iblMLPInferBuffer;
+    nvrhi::BufferHandle m_iblMLPFP32Buffer;
+    nvrhi::BufferHandle m_iblGradientsBuffer;
+    nvrhi::BufferHandle m_iblMoments1;
+    nvrhi::BufferHandle m_iblMoments2;
+    nvrhi::BufferHandle m_iblLossBuffer;
+    nvrhi::BufferHandle m_iblTrainingCB;
+
+    // Training shaders and pipelines
+    nvrhi::ShaderHandle m_iblTrainingCS;
+    nvrhi::ShaderHandle m_iblOptimizerCS;
+    nvrhi::ComputePipelineHandle m_iblTrainingPipeline;
+    nvrhi::ComputePipelineHandle m_iblOptimizerPipeline;
+    nvrhi::BindingLayoutHandle m_iblTrainingLayout;
+    nvrhi::BindingSetHandle m_iblTrainingSet;
+    nvrhi::BindingLayoutHandle m_iblOptimizerLayout;
+    nvrhi::BindingSetHandle m_iblOptimizerSet;
+
+    // Inference binding (Set 4)
+    nvrhi::BindingLayoutHandle m_iblInferLayout;
+    nvrhi::BindingSetHandle m_iblInferSet;
+
+    // Training state
+    bool m_iblTrainingActive = false;
+    uint32_t m_iblTrainingStep = 0;
+    uint32_t m_iblEpoch = 0;
+    uint32_t m_iblTotalParams = 0;
+    bool m_iblReady = false;
+
+    // Methods
+    void InitIBLNetwork();
+    void CreateIBLTrainingResources();
+    void TrainIBLStep(nvrhi::ICommandList* cmdList);
+    void ConvertIBLToInferencing();
 };

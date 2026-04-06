@@ -60,5 +60,10 @@ void UserInterface::buildUI()
         }
     }
 
+    ImGui::Separator();
+    ImGui::Text("--- Neural IBL Sampler ---");
+    ImGui::Checkbox("Enable Neural IBL", &m_userInterfaceParameters->enableNeuralIBL);
+    ImGui::Checkbox("Train IBL Sampler", &m_userInterfaceParameters->trainIBL);
+
     ImGui::End();
 }

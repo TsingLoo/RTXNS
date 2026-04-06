@@ -48,6 +48,11 @@ SamplerState s_Material                 : REGISTER_SAMPLER(0, 2);
 ByteAddressBuffer gUnifiedMLPParams     : REGISTER_SRV(0, 3);
 
 // =============================================================================
+// Binding Set 4: IBL Sampler MLP weights
+// =============================================================================
+ByteAddressBuffer gIBLMLPParams         : REGISTER_SRV(0, 4);
+
+// =============================================================================
 // Vertex structures
 // =============================================================================
 struct VertexIn
@@ -227,6 +232,53 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
 }
 
 // =============================================================================
+// IBL Sampler MLP: Predicts K sampling directions + LOD + weights + BRDF LUT
+// Input: (NdotV, roughness) -> Output: K*(cosTheta, phi, lod, weight) + (scale, bias)
+// =============================================================================
+void IBLSamplerMLP(float NdotV, float roughness, out float results[IBL_OUTPUT_NEURONS])
+{
+    float params[IBL_INPUT_FEATURES] = { NdotV, roughness };
+
+    CoopVec<VECTOR_FORMAT, IBL_INPUT_NEURONS> inputParams;
+    CoopVec<VECTOR_FORMAT, IBL_HIDDEN_NEURONS> hiddenParams;
+    CoopVec<VECTOR_FORMAT, IBL_OUTPUT_NEURONS> outputParams;
+
+    [ForceUnroll]
+    for (int i = 0; i < IBL_INPUT_FEATURES; ++i)
+        inputParams[i] = VECTOR_FORMAT(params[i]);
+
+    // Layer 0: 2 -> 32
+    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, IBL_HIDDEN_NEURONS, IBL_INPUT_NEURONS>(
+        inputParams, gIBLMLPParams, gConst.iblWeightOffsets[0].x, gConst.iblBiasOffsets[0].x,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+    [ForceUnroll] for (int a = 0; a < IBL_HIDDEN_NEURONS; ++a)
+        hiddenParams[a] = max(hiddenParams[a], VECTOR_FORMAT(0.0)); // ReLU
+
+    // Layer 1: 32 -> 32
+    hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, IBL_HIDDEN_NEURONS, IBL_HIDDEN_NEURONS>(
+        hiddenParams, gIBLMLPParams, gConst.iblWeightOffsets[0].y, gConst.iblBiasOffsets[0].y,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+    [ForceUnroll] for (int a = 0; a < IBL_HIDDEN_NEURONS; ++a)
+        hiddenParams[a] = max(hiddenParams[a], VECTOR_FORMAT(0.0)); // ReLU
+
+    // Layer 2: 32 -> 18
+    outputParams = rtxns::LinearOp<VECTOR_FORMAT, IBL_OUTPUT_NEURONS, IBL_HIDDEN_NEURONS>(
+        hiddenParams, gIBLMLPParams, gConst.iblWeightOffsets[0].z, gConst.iblBiasOffsets[0].z,
+        CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
+
+    for (int i = 0; i < IBL_OUTPUT_NEURONS; ++i)
+        results[i] = float(outputParams[i]);
+}
+
+// Helper: build tangent frame around a direction
+void ComputeTangentFrame(float3 dir, out float3 T, out float3 B)
+{
+    float3 up = abs(dir.z) < 0.999 ? float3(0, 0, 1) : float3(1, 0, 0);
+    T = normalize(cross(up, dir));
+    B = cross(dir, T);
+}
+
+// =============================================================================
 // Helper: sample a material texture by index, return white if index < 0
 // =============================================================================
 float4 SampleMaterialTexture(int texIdx, float2 uv)
@@ -359,19 +411,76 @@ void main_ps(
     float LdotH = max(1e-5f, dot(h, -lightDir.xyz));
     float VdotL = dot(view, -lightDir.xyz);
 
-    // ---- IBL Texture Sampling (Always evaluated but mathematical LUT is predicted by MLP if enabled) ----
+    // ---- IBL Texture Sampling ----
     float3 R = reflect(-view, N);
     const float MAX_REFLECTION_LOD = 10.0;
-    
-    // Diffuse
+
+    // Diffuse irradiance (always from pre-computed cubemap)
     iblDiffuse = t_Irradiance.SampleLevel(s_Skybox, N, 0.0).rgb;
-    
-    // Specular
-    float lod = roughness * MAX_REFLECTION_LOD;
-    iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
-    if (roughness < 0.04) {
-        float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
-        iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
+
+    if (gConst.enableNeuralIBL != 0)
+    {
+        // Neural IBL: MLP predicts sampling directions + LOD + weights
+        float iblResults[IBL_OUTPUT_NEURONS];
+        IBLSamplerMLP(NdotV, roughness, iblResults);
+
+        // Build tangent frame around surface NORMAL (not R!)
+        // Training generates H relative to N=(0,0,1), so we transform H from N-space to world.
+        // Using R would cause discontinuity at grazing angles → ring artifact.
+        float3 T_n, B_n;
+        ComputeTangentFrame(N, T_n, B_n);
+
+        // Reconstruct K sampling directions and sample original cubemap
+        float3 neuralSpecular = float3(0, 0, 0);
+        float weightSum = 0;
+        for (int k = 0; k < IBL_NUM_SAMPLES; k++)
+        {
+            int base = k * 4;
+            float cosTheta_h = clamp(iblResults[base + 0], 0.0, 1.0);
+            float phi_norm    = iblResults[base + 1]; // [0, 1] normalized
+            float lod_norm    = clamp(iblResults[base + 2], 0.0, 1.0);
+            float w           = max(iblResults[base + 3], 0.0);
+
+            // Convert half-vector from spherical to Cartesian (tangent space around N)
+            float phi = phi_norm * 2.0 * 3.14159265 - 3.14159265;
+            float sinTheta_h = sqrt(max(1.0 - cosTheta_h * cosTheta_h, 0.0));
+            float3 H_tangent = float3(sinTheta_h * cos(phi), sinTheta_h * sin(phi), cosTheta_h);
+
+            // Transform H from N-tangent space to world space
+            float3 H_world = T_n * H_tangent.x + B_n * H_tangent.y + N * H_tangent.z;
+            H_world = normalize(H_world);
+
+            // Compute cubemap sampling direction: L = reflect(-V, H)
+            float3 L = 2.0 * dot(view, H_world) * H_world - view;
+
+            // Sample original cubemap at learned LOD
+            // Add roughness-proportional LOD bias to compensate for K=8 discretization
+            // and the fact that the original cubemap mip chain is simple bilinear,
+            // not GGX-convolved like t_Specular.
+            float lodBias = roughness * 4.0;
+            float lod = min(lod_norm * MAX_REFLECTION_LOD + lodBias, MAX_REFLECTION_LOD);
+            neuralSpecular += t_Skybox.SampleLevel(s_Skybox, L, lod).rgb * w;
+            weightSum += w;
+        }
+        if (weightSum > 1e-6)
+            neuralSpecular /= weightSum;
+
+        iblSpecular = neuralSpecular;
+
+        // BRDF LUT from MLP (last 2 outputs)
+        int brdfBase = IBL_NUM_SAMPLES * 4;
+        envBRDF = float2(iblResults[brdfBase], iblResults[brdfBase + 1]);
+    }
+    else
+    {
+        // Traditional pre-filtered IBL
+
+        float lod = roughness * MAX_REFLECTION_LOD;
+        iblSpecular = t_Specular.SampleLevel(s_Skybox, R, lod).rgb;
+        if (roughness < 0.04) {
+            float3 sharpSky = t_Skybox.SampleLevel(s_Skybox, R, lod).rgb;
+            iblSpecular = lerp(sharpSky, iblSpecular, clamp(roughness / 0.04, 0.0, 1.0));
+        }
     }
 
     // ---- Check for unified neural shading mode ----

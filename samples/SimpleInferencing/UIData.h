@@ -12,4 +12,6 @@ struct UIData
     bool enableNeuralShading = true;
     bool enableNeuralSSS = false;  // Use unified MLP instead of cubemap IBL
     bool trainUnified = false;     // Start/stop unified MLP training
+    bool enableNeuralIBL = false;  // Use IBL Sampler MLP for specular IBL
+    bool trainIBL = false;         // Start/stop IBL Sampler training
 };

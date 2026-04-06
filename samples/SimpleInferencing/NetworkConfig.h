@@ -38,6 +38,27 @@
 #define UNIFIED_LEARNING_RATE 0.001f
 #define UNIFIED_LOSS_SCALE 128.0
 
+// --- IBL Sampler MLP (learns importance sampling directions + LOD) ---
+// Input: NdotV, roughness = 2
+// Output: K samples × (cosθ, φ, lod, weight) + (brdf_scale, brdf_bias) = K*4+2
+#define IBL_INPUT_FEATURES 2
+#define IBL_INPUT_NEURONS 2
+#define IBL_NUM_SAMPLES 8
+#define IBL_OUTPUT_NEURONS (IBL_NUM_SAMPLES * 4 + 2) // 4×4+2 = 18
+#define IBL_HIDDEN_NEURONS 32
+#define IBL_NUM_HIDDEN_LAYERS 2
+#define IBL_NUM_TRANSITIONS (IBL_NUM_HIDDEN_LAYERS + 1) // 3
+#define IBL_NUM_TRANSITIONS_ALIGN4 ((IBL_NUM_TRANSITIONS + 3) / 4) // 1
+
+#define IBL_BATCH_SIZE (1 << 16)
+#define IBL_BATCH_COUNT 50
+#define IBL_THREADS_PER_GROUP 64
+#define IBL_THREADS_PER_GROUP_OPT 32
+#define IBL_LEARNING_RATE 0.001f
+#define IBL_LOSS_SCALE 128.0
+#define IBL_MC_SAMPLES 512
+#define IBL_CUBEMAP_SIZE 1024.0f // for LOD ground truth computation
+
 // Maximum number of material textures supported in the bindless texture array
 #define MAX_MATERIAL_TEXTURES 64
 
@@ -74,6 +95,14 @@ struct NeuralConstants
     uint enableNeuralSSS;
     uint4 uniWeightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
     uint4 uniBiasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
+
+    // IBL Sampler MLP
+    uint enableNeuralIBL;
+    uint _pad_ibl0;
+    uint _pad_ibl1;
+    uint _pad_ibl2;
+    uint4 iblWeightOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
+    uint4 iblBiasOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
 };
 
 // GPU material parameters — must match C++ MaterialParams exactly
@@ -105,6 +134,21 @@ struct UnifiedTrainingConstants
 {
     uint4 weightOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
     uint4 biasOffsets[UNIFIED_NUM_TRANSITIONS_ALIGN4];
+
+    uint32_t maxParamSize;
+    float learningRate;
+    float currentStep;
+    uint32_t batchSize;
+
+    uint64_t seed;
+    uint2 _pad;
+};
+
+// Training constant buffer for IBL Sampler MLP
+struct IBLTrainingConstants
+{
+    uint4 weightOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
+    uint4 biasOffsets[IBL_NUM_TRANSITIONS_ALIGN4];
 
     uint32_t maxParamSize;
     float learningRate;
