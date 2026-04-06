@@ -183,6 +183,19 @@ bool SimpleInferencing::LoadModel(const std::string& path)
             i, m.thicknessTexIdx, m.occlusionTexIdx, m.curvatureTexIdx);
     }
 
+    // SSS-GGX-MLP: Initialize UI sliders from the loaded model's material properties.
+    // This ensures the MLP receives the correct roughness/metallic/specular on first render,
+    // and the user can adjust them in real-time via the sliders.
+    if (!mats.empty() && m_userInterfaceParameters)
+    {
+        const auto& mat0 = mats[0];
+        m_userInterfaceParameters->roughness = mat0.roughness;
+        m_userInterfaceParameters->metallic = mat0.metallic;
+        m_userInterfaceParameters->specular = mat0.specular;
+        log::info("UI material params initialized from GLB: roughness=%.2f, metallic=%.2f, specular=%.2f",
+            mat0.roughness, mat0.metallic, mat0.specular);
+    }
+
     return true;
 }
 

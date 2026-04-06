@@ -268,9 +268,11 @@ void main_ps(
         if (mat.alphaMode == 1 && baseColor.a < mat.alphaCutoff)
             discard;
         
-        // Metallic-roughness texture (glTF spec: B = metallic, G = roughness)
-        roughness = mat.roughness;
-        metallic = mat.metallic;
+        // Metallic-roughness: Use UI slider values (gConst) for real-time control.
+        // GLB values only set the initial slider position (see C++ LoadModel).
+        // Per-vertex metallic-roughness textures still modulate the base values.
+        roughness = gConst.roughness;
+        metallic = gConst.metallic;
         if (mat.metallicRoughnessTexIdx >= 0)
         {
             float4 mrTex = SampleMaterialTexture(mat.metallicRoughnessTexIdx, vOut.uv);
@@ -278,7 +280,7 @@ void main_ps(
             metallic *= mrTex.b;
         }
         
-        specular = mat.specular;
+        specular = gConst.specular;
         
         // Occlusion (R channel)
         if (mat.occlusionTexIdx >= 0)
