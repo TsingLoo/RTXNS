@@ -10,7 +10,7 @@
 
 import Optimizers;
 
-DECLARE_CBUFFER(IBLTrainingConstants, gConst, 0, 0);
+DECLARE_CBUFFER(GenericTrainingConstants, gConst, 0, 0);
 RWBuffer<half> gMLPParams             : REGISTER_UAV(0, 0);
 RWBuffer<float> gMLPParams32          : REGISTER_UAV(1, 0);
 RWBuffer<half> gMLPParamsGradients    : REGISTER_UAV(2, 0);

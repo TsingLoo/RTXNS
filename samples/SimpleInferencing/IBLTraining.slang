@@ -20,7 +20,7 @@ import PCG32;
 // =============================================================================
 // Bindings (no cubemap — pure math training)
 // =============================================================================
-DECLARE_CBUFFER(IBLTrainingConstants, gConst, 0, 0);
+DECLARE_CBUFFER(GenericTrainingConstants, gConst, 0, 0);
 ByteAddressBuffer gMLPParams               : REGISTER_SRV(0, 0);
 RWByteAddressBuffer gMLPParamsGradients    : REGISTER_UAV(0, 0);
 RWBuffer<float>     gLossBuffer            : REGISTER_UAV(1, 0);
@@ -195,8 +195,8 @@ void main_cs(uint3 dispatchThreadID : SV_DispatchThreadID)
         CoopVecMatrixLayout::TrainingOptimal, CoopVecComponentType::Float16>(
         gMLPParams,
         gMLPParamsGradients,
-        rtxns::UnpackArray<IBL_NUM_TRANSITIONS_ALIGN4, IBL_NUM_TRANSITIONS>(gConst.weightOffsets),
-        rtxns::UnpackArray<IBL_NUM_TRANSITIONS_ALIGN4, IBL_NUM_TRANSITIONS>(gConst.biasOffsets));
+        rtxns::UnpackArray<MAX_TRANSITIONS_ALIGN4, IBL_NUM_TRANSITIONS>(gConst.weightOffsets),
+        rtxns::UnpackArray<MAX_TRANSITIONS_ALIGN4, IBL_NUM_TRANSITIONS>(gConst.biasOffsets));
 
     var hiddenActivation = rtxns::mlp::ReLUAct<half, IBL_HIDDEN_NEURONS>();
     var finalActivation = rtxns::mlp::NoneAct<half, IBL_OUTPUT_NEURONS>();

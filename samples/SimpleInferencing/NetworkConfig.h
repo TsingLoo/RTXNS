@@ -147,8 +147,10 @@ struct GenericTrainingConstants
     uint2 _pad;
 };
 
-// Aliases for backward compatibility (works in both C++ and Slang)
-#define UnifiedTrainingConstants GenericTrainingConstants
-#define IBLTrainingConstants GenericTrainingConstants
+#ifdef __cplusplus
+// Legacy aliases for compatibility in C++ code
+typedef GenericTrainingConstants UnifiedTrainingConstants;
+typedef GenericTrainingConstants IBLTrainingConstants;
+#endif
 
 #endif //__NETWORK_CONFIG_H__
