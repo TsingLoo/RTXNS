@@ -11,6 +11,7 @@
 import CooperativeVectorFunctions;
 import Utils;
 import LinearOps;
+import BRDF;
 
 #include "NetworkConfig.h"
 #include <donut/shaders/binding_helpers.hlsli>
@@ -93,65 +94,7 @@ void main_vs(
 // =============================================================================
 // Disney BRDF
 // =============================================================================
-const static float DISNEY_PI = 3.14159265358979323846;
-
-float SchlickFresnel(float u)
-{
-    float m = clamp(1 - u, 0, 1);
-    float m2 = m * m;
-    return m2 * m2 * m; // pow(m,5)
-}
-
-float Gtr1(float NdotH, float a)
-{
-    if (a >= 1)
-    {
-        return 1 / DISNEY_PI;
-    }
-    float a2 = a * a;
-    float t = 1 + (a2 - 1) * NdotH * NdotH;
-    return (a2 - 1) / (DISNEY_PI * log(a2) * t);
-}
-
-float Gtr2(float NdotH, float ax)
-{
-    float a = ax * (1 / ax / ax * (1 - NdotH * NdotH) + NdotH * NdotH);
-    return 1 / (DISNEY_PI * a * a);
-}
-
-float SmithGGX(float NdotV, float alphaG)
-{
-    float a = alphaG * alphaG;
-    float b = NdotV * NdotV;
-    return 1 / (NdotV + sqrt(a + b - a * b));
-}
-
-float SmithGGXAnisotropy(float NdotV, float ax)
-{
-    return 1 / (NdotV + sqrt(ax * ax * (1 - NdotV * NdotV) + NdotV * NdotV));
-}
-
-float4 Disney(float NdotL, float NdotV, float NdotH, float LdotH, float roughness)
-{
-    float FL = SchlickFresnel(NdotL), FV = SchlickFresnel(NdotV);
-    float Fss90 = LdotH * LdotH * roughness;
-    float Fss = lerp(1.0f, Fss90, FL) * lerp(1.0f, Fss90, FV);
-    float ss = 1.25f * (Fss * (1.f / (NdotL + NdotV) - .5f) + .5f);
-
-    // specular
-    float ax = max(.001f, roughness * roughness);
-    float Ds = Gtr2(NdotH, ax);
-    float FH = SchlickFresnel(LdotH);
-    float Gs = SmithGGXAnisotropy(NdotL, ax);
-    Gs *= SmithGGXAnisotropy(NdotV, ax);
-
-    // clearcoat (ior = 1.5 -> F0 = 0.04)
-    float Dr = Gtr1(NdotH, .01f);
-    float Fr = lerp(.04f, 1.0f, FH);
-    float Gr = SmithGGX(NdotL, .25f) * SmithGGX(NdotV, .25f);
-
-    return float4((1 / DISNEY_PI) * ss, Gs * Ds, FH, .25 * Gr * Fr * Dr);
-}
+// Disney BRDF & GGX tools are now imported from BRDF.slang
 
 // =============================================================================
 // Unified MLP: Residual SSS network (5 layers: input_proj + 3 blocks + output)
@@ -184,7 +127,7 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
         inputParams[i] = VECTOR_FORMAT(params[i]);
     }
 
-    // Layer 0 (input_proj): 11 -> 256
+    // Layer 0 (input_proj): UNIFIED_INPUT_NEURONS -> UNIFIED_HIDDEN_NEURONS
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_INPUT_NEURONS>(
         inputParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].x, gConst.uniBiasOffsets[0].x,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
@@ -192,7 +135,7 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
         hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i]));
     }
 
-    // Layer 1 (block1 + residual skip): 256 -> 256
+    // Layer 1 (block1 + residual skip): UNIFIED_HIDDEN_NEURONS -> UNIFIED_HIDDEN_NEURONS
     CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> savedHidden1 = hiddenParams;
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].y, gConst.uniBiasOffsets[0].y,
@@ -201,7 +144,7 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
         hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i])) + savedHidden1[act_i];
     }
 
-    // Layer 2 (block2 + residual skip): 256 -> 256
+    // Layer 2 (block2 + residual skip): UNIFIED_HIDDEN_NEURONS -> UNIFIED_HIDDEN_NEURONS
     CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> savedHidden2 = hiddenParams;
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].z, gConst.uniBiasOffsets[0].z,
@@ -210,7 +153,7 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
         hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i])) + savedHidden2[act_i];
     }
 
-    // Layer 3 (block3 + residual skip): 256 -> 256
+    // Layer 3 (block3 + residual skip): UNIFIED_HIDDEN_NEURONS -> UNIFIED_HIDDEN_NEURONS
     CoopVec<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS> savedHidden3 = hiddenParams;
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_HIDDEN_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[0].w, gConst.uniBiasOffsets[0].w,
@@ -219,7 +162,7 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
         hiddenParams[act_i] = log(VECTOR_FORMAT(1.0) + exp(hiddenParams[act_i])) + savedHidden3[act_i];
     }
 
-    // Layer 4 (output): 256 -> 3
+    // Layer 4 (output): UNIFIED_HIDDEN_NEURONS -> UNIFIED_OUTPUT_NEURONS
     outputParams = rtxns::LinearOp<VECTOR_FORMAT, UNIFIED_OUTPUT_NEURONS, UNIFIED_HIDDEN_NEURONS>(
         hiddenParams, gUnifiedMLPParams, gConst.uniWeightOffsets[1].x, gConst.uniBiasOffsets[1].x,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
@@ -247,21 +190,21 @@ void IBLSamplerMLP(float NdotV, float roughness, out float results[IBL_OUTPUT_NE
     for (int i = 0; i < IBL_INPUT_FEATURES; ++i)
         inputParams[i] = VECTOR_FORMAT(params[i]);
 
-    // Layer 0: 2 -> 32
+    // Layer 0: IBL_INPUT_NEURONS -> IBL_HIDDEN_NEURONS
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, IBL_HIDDEN_NEURONS, IBL_INPUT_NEURONS>(
         inputParams, gIBLMLPParams, gConst.iblWeightOffsets[0].x, gConst.iblBiasOffsets[0].x,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
     [ForceUnroll] for (int a = 0; a < IBL_HIDDEN_NEURONS; ++a)
         hiddenParams[a] = max(hiddenParams[a], VECTOR_FORMAT(0.0)); // ReLU
 
-    // Layer 1: 32 -> 32
+    // Layer 1: IBL_HIDDEN_NEURONS -> IBL_HIDDEN_NEURONS
     hiddenParams = rtxns::LinearOp<VECTOR_FORMAT, IBL_HIDDEN_NEURONS, IBL_HIDDEN_NEURONS>(
         hiddenParams, gIBLMLPParams, gConst.iblWeightOffsets[0].y, gConst.iblBiasOffsets[0].y,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);
     [ForceUnroll] for (int a = 0; a < IBL_HIDDEN_NEURONS; ++a)
         hiddenParams[a] = max(hiddenParams[a], VECTOR_FORMAT(0.0)); // ReLU
 
-    // Layer 2: 32 -> 18
+    // Layer 2: IBL_HIDDEN_NEURONS -> IBL_OUTPUT_NEURONS
     outputParams = rtxns::LinearOp<VECTOR_FORMAT, IBL_OUTPUT_NEURONS, IBL_HIDDEN_NEURONS>(
         hiddenParams, gIBLMLPParams, gConst.iblWeightOffsets[0].z, gConst.iblBiasOffsets[0].z,
         CoopVecMatrixLayout::InferencingOptimal, TYPE_INTERPRETATION);

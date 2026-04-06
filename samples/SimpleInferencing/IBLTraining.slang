@@ -16,6 +16,7 @@ import Activation;
 import MLP;
 import Loss;
 import PCG32;
+import BRDF;
 
 // =============================================================================
 // Bindings (no cubemap — pure math training)
@@ -26,57 +27,7 @@ RWByteAddressBuffer gMLPParamsGradients    : REGISTER_UAV(0, 0);
 RWBuffer<float>     gLossBuffer            : REGISTER_UAV(1, 0);
 
 // =============================================================================
-// Math constants and helpers
-// =============================================================================
-const static float PI = 3.14159265358979323846;
-
-float RadicalInverse_VdC(uint bits)
-{
-    bits = (bits << 16u) | (bits >> 16u);
-    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
-    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
-    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
-    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
-    return float(bits) * 2.3283064365386963e-10;
-}
-
-float2 Hammersley(uint i, uint N)
-{
-    return float2(float(i) / float(N), RadicalInverse_VdC(i));
-}
-
-// GGX NDF
-float D_GGX(float NdotH, float roughness)
-{
-    float a = roughness * roughness;
-    float a2 = a * a;
-    float denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    return a2 / (PI * denom * denom);
-}
-
-// ImportanceSampleGGX: returns half-vector H in tangent space (N = [0,0,1])
-float3 ImportanceSampleGGX(float2 xi, float roughness)
-{
-    float a = roughness * roughness;
-    float phi = 2.0 * PI * xi.x;
-    float cosTheta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-
-    return float3(cos(phi) * sinTheta, sin(phi) * sinTheta, cosTheta);
-}
-
-// Smith GGX geometry
-float GeometrySchlickGGX(float NdotV, float roughness)
-{
-    float k = (roughness * roughness) / 2.0;
-    return NdotV / (NdotV * (1.0 - k) + k);
-}
-
-float GeometrySmith(float NdotV, float NdotL, float roughness)
-{
-    return GeometrySchlickGGX(NdotV, roughness) * GeometrySchlickGGX(NdotL, roughness);
-}
-
+// BRDF tools imported from BRDF.slang
 // =============================================================================
 // Main training kernel
 // =============================================================================
