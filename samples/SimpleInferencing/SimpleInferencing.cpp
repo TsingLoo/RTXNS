@@ -495,6 +495,13 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
     modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
     modelConstant.inverseViewProject = inverse(modelConstant.viewProject);
 
+    // Rotation-only inverse VP for skybox (follows Donut SkyPass pattern):
+    // Decompose into invProj * invViewRot (with translation zeroed).
+    float4x4 proj = perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
+    auto viewAffine = lookatZ(-camDir, camUp);  // rotation-only affine (no translation)
+    viewAffine.m_translation = float3(0.f);     // ensure zero translation
+    modelConstant.inverseViewProjectNoTranslation = inverse(proj) * affineToHomogeneous(inverse(viewAffine));
+
     m_commandList->writeBuffer(m_constantBuffer, &modelConstant, sizeof(modelConstant));
 
     if (m_skyboxRenderer)

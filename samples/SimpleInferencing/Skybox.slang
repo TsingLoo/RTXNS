@@ -13,7 +13,7 @@ cbuffer SkyboxConstants : register(b0)
 struct VSOutput
 {
     float4 position : SV_Position;
-    float3 viewDir  : TEXCOORD0;
+    float2 clipXY   : TEXCOORD0;
 };
 
 [shader("vertex")]
@@ -23,14 +23,10 @@ VSOutput main_vs(uint vertexID : SV_VertexID)
     
     // Generate a full screen triangle
     float2 uv = float2((vertexID << 1) & 2, vertexID & 2);
-    float4 posClip = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 1.0, 1.0); // Z=1.0 for reversed Z, drawn behind everything
+    float4 posClip = float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), 1.0, 1.0);
     
     output.position = posClip;
-
-    // Calculate view direction for this pixel by unprojecting clip space coordinates
-    float4 posWorld = mul(posClip, constants.inverseViewProject);
-    float3 worldPos = posWorld.xyz / posWorld.w;
-    output.viewDir = normalize(worldPos - constants.cameraPos.xyz);
+    output.clipXY = posClip.xy;
 
     return output;
 }
@@ -38,7 +34,13 @@ VSOutput main_vs(uint vertexID : SV_VertexID)
 [shader("fragment")]
 float4 main_ps(VSOutput input) : SV_Target
 {
-    float3 d = normalize(input.viewDir);
+    // Unproject clip-space to world-space direction using rotation-only inverse VP.
+    // Z=0 maps to the near plane, which gives view-space direction (cx/xScale, cy/yScale, 1).
+    // The perspective divide and normalize produce the correct world direction.
+    float4 posClip = float4(input.clipXY, 0.0, 1.0);
+    float4 worldDir = mul(posClip, constants.inverseViewProjectNoTranslation);
+    float3 d = normalize(worldDir.xyz / worldDir.w);
+    
     float4 color = t_Skybox.SampleLevel(s_Skybox, d, 0); 
     return float4(color.rgb, 1.0);
 }
