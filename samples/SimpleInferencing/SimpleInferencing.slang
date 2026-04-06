@@ -103,7 +103,7 @@ void main_vs(
 // =============================================================================
 void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
     float roughness, float metallic, float specularParam,
-    float thickness, float ao, float curvature, out float results[UNIFIED_OUTPUT_NEURONS])
+    float thickness, float ao, float curvature, float3 baseColor, out float results[UNIFIED_OUTPUT_NEURONS])
 {
     // Compute 5 SSS-physics-informed features from existing inputs
     float wrap_lighting = saturate(NdotL * 0.5 + 0.5);
@@ -115,7 +115,8 @@ void UnifiedMLP(float NdotL, float NdotV, float NdotH, float VdotL,
     float params[UNIFIED_INPUT_FEATURES] = {
         NdotL, NdotV, NdotH, VdotL, roughness, metallic, specularParam,
         thickness, ao, curvature,
-        wrap_lighting, transmission_feat, forward_scatter, thin_backlight, fresnel
+        wrap_lighting, transmission_feat, forward_scatter, thin_backlight, fresnel,
+        baseColor.r, baseColor.g, baseColor.b
     };
 
     CoopVec<VECTOR_FORMAT, UNIFIED_INPUT_NEURONS> inputParams;
@@ -441,7 +442,7 @@ void main_ps(
         float mlpResults[UNIFIED_OUTPUT_NEURONS];
         
         UnifiedMLP(NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular,
-            thickness, ao, curvature, mlpResults);
+            thickness, ao, curvature, baseColor.rgb, mlpResults);
         
         // MLP output = unit-intensity complete shading response (SSS + specular baked in).
         float3 hdrShading = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
@@ -463,7 +464,7 @@ void main_ps(
         }
         
         // Multiply by base color and light intensity to get final directional contribution.
-        float3 neuralDirectional = hdrShading * baseColor.rgb * gConst.lightIntensity.rgb;
+        float3 neuralDirectional = hdrShading * gConst.lightIntensity.rgb;
         
         float3 finalColor = neuralDirectional;
         

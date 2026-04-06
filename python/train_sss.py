@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 # =========================================
 # 1. 网络结构（残差 + SSS 特征）
 # =========================================
-INPUT_DIM = 15  # NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel
+INPUT_DIM = 18  # NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular, thick, ao, curv, wrap, trans, fwd_scatter, thin_backlight, fresnel, baseR, baseG, baseB
 
 class NeuralSSS(nn.Module):
     def __init__(self):
@@ -78,10 +78,15 @@ for idx in range(n_renders):
     # 加载材质参数 (SSS-GGX-MLP: 每张渲染可能有不同的 roughness/metallic/specular)
     mat_path = os.path.join(data_dir, f'matparams_{idx:04d}.npy')
     if os.path.exists(mat_path):
-        mat_params = np.load(mat_path)  # [roughness, metallic, specular]
-        render_roughness, render_metallic, render_specular = mat_params
+        mat_params = np.load(mat_path)  # [roughness, metallic, specular, R, G, B]
+        render_roughness, render_metallic, render_specular = mat_params[:3]
+        if len(mat_params) >= 6:
+            render_base_r, render_base_g, render_base_b = mat_params[3:6]
+        else:
+            render_base_r, render_base_g, render_base_b = 0.28, 0.58, 0.22 # Fallback
     else:
         render_roughness, render_metallic, render_specular = 0.4, 0.0, 0.5  # 默认值
+        render_base_r, render_base_g, render_base_b = 0.28, 0.58, 0.22 # Fallback
     
     h, w = render_rgba.shape[:2]
     
@@ -142,7 +147,10 @@ for idx in range(n_renders):
         np.full_like(NdotL, render_metallic),
         np.full_like(NdotL, render_specular),
         thick, ao, curv,
-        wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel
+        wrap_lighting, transmission, forward_scatter, thin_backlight, fresnel,
+        np.full_like(NdotL, render_base_r),
+        np.full_like(NdotL, render_base_g),
+        np.full_like(NdotL, render_base_b)
     ], axis=-1)
     
     all_inputs.append(inputs_batch)
@@ -164,11 +172,9 @@ if os.path.exists(sun_energy_file):
 else:
     print("警告: 未找到 sun_energy.npy，跳过光强归一化（旧数据兼容模式）")
 
-# 颜色解耦: 网络学习 transmittance = RGB / base_color
-# 这样换色时只需替换 base_color，不用重新训练
-# SSS 的波长差异 (R/G/B 散射半径不同) 在 transmittance 中自然保留
-base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
-Y_norm = Y / (base_color + 1e-6)
+# 直接让网络预测完整颜色。不需要解耦，网络内部理解 base_color
+base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32) # Fallback / reference display only
+Y_norm = Y
 
 # [艺术夸张策略]: 物理上厚物体的背光 SSS 本来就很暗。
 # 我们可以人为提亮训练目标中的“背光面 (NdotL < 0)”颜色的亮度。
@@ -219,16 +225,9 @@ except Exception as e:
     print(f"警告：无法启动 evaluate_render.py 子进程: {e}")
 
 # =========================================
-# SSS-Aware Loss: 同时兼顾暗部精度和亮部通透感
-# =========================================
-# 通道权重: 补偿 base_color 除法造成的梯度不均衡
-# base_color = [0.28, 0.58, 0.22] → 除法后 G 通道值最小、梯度最大
-# 为了均衡，给值被放大更多的通道(R,B)更高权重，抵消 log 空间的梯度衰减
-_base_color_t = torch.tensor([0.28, 0.58, 0.22], device='cuda', dtype=torch.float32)
-_inv_base = 1.0 / _base_color_t  # [3.57, 1.72, 4.55] — 放大倍率
-sss_channel_weight = _inv_base / _inv_base.sum() * 3.0  # 归一化后 × 3 保持总权重不变
-# 结果 ≈ [1.09, 0.53, 1.38] — B 最高、G 最低，正好补偿 base_color 除法的不均衡
-print(f"通道均衡权重: R={sss_channel_weight[0]:.3f}, G={sss_channel_weight[1]:.3f}, B={sss_channel_weight[2]:.3f}")
+# 由于取消了 base_color 除法，直接使用均衡权重
+sss_channel_weight = torch.ones(3, device='cuda', dtype=torch.float32)
+print("通道均衡权重: 全1")
 
 def sss_aware_loss(pred, target):
     # 使用 Log-Space (对数空间) 进行监督，解决直接受光面压制暗部 SSS 细节的问题。
@@ -305,7 +304,7 @@ def export_model_json(model, path):
     })
     
     out_data["y_scale"] = [1.0, 1.0, 1.0]
-    out_data["base_color"] = base_color.tolist()
+    out_data["base_color"] = [1.0, 1.0, 1.0]
     with open(path, "w") as f:
         json.dump(out_data, f)
 
@@ -402,8 +401,8 @@ with torch.no_grad():
     sample_x = torch.from_numpy(X_val[:5]).cuda()
     sample_hdr = model(sample_x).cpu().numpy()
     sample_hdr = np.maximum(sample_hdr, 0.0)
-    sample_pred = sample_hdr * base_color
-    sample_gt = Y_val[:5] * base_color
+    sample_pred = sample_hdr
+    sample_gt = Y_val[:5]
 
     for i in range(5):
         p = sample_pred[i]

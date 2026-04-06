@@ -95,8 +95,11 @@ for light_idx, ld in enumerate(light_dirs):
         r_roughness = random.uniform(0.1, 0.9)
         r_metallic = random.uniform(0.0, 0.8)
         r_specular = random.uniform(0.3, 0.7)
+        r_base_color = (random.uniform(0.1, 1.0), random.uniform(0.1, 1.0), random.uniform(0.1, 1.0), 1.0)
 
         # 应用到 Blender BSDF
+        if 'Base Color' in bsdf.inputs:
+            bsdf.inputs['Base Color'].default_value = r_base_color
         if 'Roughness' in bsdf.inputs:
             bsdf.inputs['Roughness'].default_value = r_roughness
         if 'Metallic' in bsdf.inputs:
@@ -114,7 +117,7 @@ for light_idx, ld in enumerate(light_dirs):
         np.save(os.path.join(output_dir, f'lightdir_{render_idx:04d}.npy'),
                 np.array(ld, dtype=np.float32))
         np.save(os.path.join(output_dir, f'matparams_{render_idx:04d}.npy'),
-                np.array([r_roughness, r_metallic, r_specular], dtype=np.float32))
+                np.array([r_roughness, r_metallic, r_specular, r_base_color[0], r_base_color[1], r_base_color[2]], dtype=np.float32))
 
         print(f"  [{render_idx+1}/{total_renders}] L={light_idx}, "
               f"rough={r_roughness:.2f}, metal={r_metallic:.2f}, spec={r_specular:.2f}")
