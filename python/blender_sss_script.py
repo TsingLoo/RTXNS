@@ -97,7 +97,7 @@ nodes.active = tex_node
 
 bpy.context.scene.cycles.bake_type = 'AO'
 bpy.ops.object.bake(type='AO')
-ao_img.filepath_raw = os.path.join(output_dir, 'ao_map.exr')
+ao_img.filepath_raw = os.path.join(output_dir, 'ao_uv.exr')
 ao_img.file_format = 'OPEN_EXR'
 ao_img.save()
 print("AO 烘焙并保存完成")
@@ -170,7 +170,7 @@ if not light:
     scene.collection.objects.link(light)
 
 light.data.type = 'POINT'
-light.data.energy = 1000 * (size ** 2)
+light.data.energy = 5000 * (size ** 2)
 # 完全关闭阴影！以保证只提取纯粹由厚度主导的局部 SSS 衰减，避免全局自遮挡产生的不可学习黑斑！
 light.data.use_shadow = False
 light_radius = size * 3
@@ -254,6 +254,22 @@ if 'Pointiness' in geom_node.outputs:
     scene.render.filepath = os.path.join(output_dir, 'curvature_map.exr')
     bpy.ops.render.render(write_still=True)
     print("Curvature/Pointiness Map 烘焙完成！")
+
+# 烘焙厚度图 (Camera Space)
+vc_node = nodes.new('ShaderNodeVertexColor')
+vc_node.layer_name = "Thickness"
+links.new(vc_node.outputs['Color'], emit_node.inputs['Color'])
+scene.render.filepath = os.path.join(output_dir, 'thickness_map.exr')
+bpy.ops.render.render(write_still=True)
+print("Thickness Map (Camera Space) 烘焙完成！")
+
+# 烘焙 AO 图 (Camera Space) - 从之前烘焙好的 UV 纹理上采集
+ao_tex_cam_node = nodes.new('ShaderNodeTexImage')
+ao_tex_cam_node.image = ao_img
+links.new(ao_tex_cam_node.outputs['Color'], emit_node.inputs['Color'])
+scene.render.filepath = os.path.join(output_dir, 'ao_map.exr')
+bpy.ops.render.render(write_still=True)
+print("AO Map (Camera Space) 烘焙完成！")
 
 
 # ============================================
@@ -404,6 +420,11 @@ bsdf_export.inputs['Base Color'].default_value = (0.28, 0.58, 0.22, 1.0)
 bsdf_export.inputs['Roughness'].default_value = 0.4
 bsdf_export.inputs['Metallic'].default_value = 0.0
 bsdf_export.inputs['IOR'].default_value = 1.62
+
+# 重新创建厚度贴图节点
+thick_tex_node = nodes.new('ShaderNodeTexImage')
+thick_tex_node.image = thick_img
+thick_tex_node.label = "ThicknessMap"
 
 # 连接 thickness 到 Transmission Weight (triggers KHR_materials_volume export)
 bsdf_export.inputs['Subsurface Weight'].default_value = 1.0

@@ -16,7 +16,7 @@ INPUT_DIM = 11  # NdotL, NdotV, VdotL, thick, ao, curv, wrap, trans, fwd_scatter
 class NeuralSSS(nn.Module):
     def __init__(self):
         super().__init__()
-        width = 256
+        width = 64
         self.input_proj = nn.Linear(INPUT_DIM, width)
         self.act = nn.Softplus()
         self.block1 = nn.Sequential(nn.Linear(width, width), nn.Softplus())
@@ -78,7 +78,7 @@ for idx in range(n_renders):
     h, w = render_rgba.shape[:2]
     
     # 向量化处理以极大加速拼接
-    alpha_mask = render_rgba[:, :, 3] >= 0.5
+    alpha_mask = render_rgba[:, :, 3] >= 0.99
     valid_y, valid_x = np.where(alpha_mask)
     
     rgb = render_rgba[valid_y, valid_x, :3]
@@ -258,7 +258,7 @@ def export_model_json(model, path):
 # 3. 训练
 # =========================================
 model = NeuralSSS().cuda()
-epochs = 300
+epochs = 50
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=epochs, eta_min=1e-6

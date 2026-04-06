@@ -25,7 +25,7 @@
 #define UNIFIED_INPUT_FEATURES 11
 #define UNIFIED_INPUT_NEURONS 11
 #define UNIFIED_OUTPUT_NEURONS 3 // RGB output
-#define UNIFIED_HIDDEN_NEURONS 256
+#define UNIFIED_HIDDEN_NEURONS 64
 #define UNIFIED_NUM_HIDDEN_LAYERS 4                        // 5 transitions total (input_proj + 3 residual blocks + output)
 #define UNIFIED_NUM_TRANSITIONS (UNIFIED_NUM_HIDDEN_LAYERS + 1) // 5
 #define UNIFIED_NUM_TRANSITIONS_ALIGN4 ((UNIFIED_NUM_TRANSITIONS + 3) / 4) // 2

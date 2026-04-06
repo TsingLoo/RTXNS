@@ -31,7 +31,7 @@ def load_exr_channels(filepath, channels=('R', 'G', 'B', 'A')):
 class NeuralSSS(nn.Module):
     def __init__(self):
         super().__init__()
-        width = 256
+        width = 64
         self.input_proj = nn.Linear(INPUT_DIM, width)
         self.act = nn.Softplus()
         self.block1 = nn.Sequential(nn.Linear(width, width), nn.Softplus())
@@ -114,7 +114,7 @@ def render_live_preview(test_idx=0):
             a = render_rgba[y, x, 3]
             img_gt[y, x] = render_rgba[y, x, :3] 
             
-            if a < 0.5:
+            if a < 0.99:
                 continue
                 
             pixel_pos = pos_map[y, x]
