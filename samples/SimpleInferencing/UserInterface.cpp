@@ -50,6 +50,7 @@ void UserInterface::buildUI()
     ImGui::Text("--- Neural Jade SSS (Offline) ---");
     
     ImGui::Checkbox("Enable Neural SSS Render", &m_userInterfaceParameters->enableNeuralSSS);
+    ImGui::SliderFloat("SSS Desaturation", &m_userInterfaceParameters->sssDesatStrength, 0.f, 0.05f, "%.3f");
 
     if (ImGui::Button("Load SSS Weights (JSON)"))
     {

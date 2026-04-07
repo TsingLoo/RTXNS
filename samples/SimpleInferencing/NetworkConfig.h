@@ -100,7 +100,7 @@ struct NeuralConstants
 
     // IBL Sampler MLP
     uint enableNeuralIBL;
-    uint _pad_ibl0;
+    float sssDesatStrength;   // Beer-Lambert SSS desaturation intensity (0=off, 1=full white)
     uint _pad_ibl1;
     uint _pad_ibl2;
     uint4 iblWeightOffsets[IBL_NUM_TRANSITIONS_ALIGN4];

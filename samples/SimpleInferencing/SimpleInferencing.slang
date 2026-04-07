@@ -450,8 +450,16 @@ void main_ps(
         // Training divides linear HDR by linear base_color, so inference multiplies back in linear.
         float3 Cdlin_sss = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
         
-        // Compose: transport * linear base color * light intensity
-        float3 neuralDirectional = hdrTransport * Cdlin_sss * gConst.lightIntensity.rgb;
+        // Beer-Lambert inspired SSS desaturation:
+        // High transport → dense scattering → pigment color washes toward white.
+        // Only applied on the lit side (NdotL > 0); back-lit side keeps its natural color.
+        float transportMag = (hdrTransport.r + hdrTransport.g + hdrTransport.b) / 3.0;
+        float desatAmount = saturate(transportMag * gConst.sssDesatStrength);
+        float litMask = saturate(NdotL);  // 0 on back-lit, 1 on front-lit
+        float3 Cdlin_final = lerp(Cdlin_sss, lerp(Cdlin_sss, float3(1, 1, 1), desatAmount), litMask);
+        
+        // Compose: transport * (desaturated) linear base color * light intensity
+        float3 neuralDirectional = hdrTransport * Cdlin_final * gConst.lightIntensity.rgb;
         
         // Hue-preserving highlight compression (Reinhard soft-knee on max channel).
         // Applied AFTER composition to compress actual HDR brightness while preserving hue.

@@ -552,6 +552,7 @@ void SimpleInferencing::Render(nvrhi::IFramebuffer* framebuffer)
 
     // IBL Sampler MLP constants
     modelConstant.enableNeuralIBL = (m_userInterfaceParameters->enableNeuralIBL && m_iblMLP.IsReady()) ? 1u : 0u;
+    modelConstant.sssDesatStrength = m_userInterfaceParameters->sssDesatStrength;
     m_iblMLP.FillInferOffsets(modelConstant.iblWeightOffsets, modelConstant.iblBiasOffsets);
     modelConstant.view = affineToHomogeneous(translation(-camPos) * lookatZ(-camDir, camUp));
     modelConstant.viewProject = modelConstant.view * perspProjD3DStyle(radians(67.4f), float(width) / float(height), 0.1f, 10.f);
