@@ -164,10 +164,10 @@ if os.path.exists(sun_energy_file):
 else:
     print("警告: 未找到 sun_energy.npy，跳过光强归一化（旧数据兼容模式）")
 
-# 颜色解耦: 网络学习 transmittance = RGB / base_color
-# 这样换色时只需替换 base_color，不用重新训练
-# SSS 的波长差异 (R/G/B 散射半径不同) 在 transmittance 中自然保留
-base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
+# 颜色解耦: 在线性空间做 transmittance = RGB_linear / base_color_linear
+# Shader 推理时用 Cdlin_sss = pow(baseColor, 2.2) 乘回，两端一致
+base_color_srgb = np.array([0.28, 0.58, 0.22], dtype=np.float32)
+base_color = np.power(base_color_srgb, 2.2).astype(np.float32)  # Linear space
 Y_norm = Y / (base_color + 1e-6)
 
 # [艺术夸张策略]: 物理上厚物体的背光 SSS 本来就很暗。
@@ -175,10 +175,11 @@ Y_norm = Y / (base_color + 1e-6)
 # 当网络去学习这部分时，自然会给出更强烈的透射感。
 # X[:, 0] 是 NdotL。
 # max_boost=2.0 意味着在完全背光时 (-NdotL=1)，网络的目标被放大了 1+2.0=3.0 倍。
-artificial_sss_boost = - 0.1
-sss_enhance = 1.0 + artificial_sss_boost * np.maximum(-X[:, 0], 0.0)
+artificial_sss_boost = 0.5
+thickness_gate = np.clip(1.0 - X[:, 7], 0.0, 1.0)  # X[:,7]=thickness: 薄处=1, 厚处=0
+sss_enhance = 1.0 + artificial_sss_boost * np.maximum(-X[:, 0], 0.0) * thickness_gate
 Y_norm = Y_norm * sss_enhance[:, None]
-print(f"已应用背光艺术增强 (Artifical SSS Boost) 提升透光感！最大增强倍数: {1.0+artificial_sss_boost}x")
+print(f"已应用厚度门控背光增强 (SSS Boost x thickness gate)！最大增强倍数: {1.0+artificial_sss_boost}x")
 
 # 90/10 划分 train/val
 n = len(X)
@@ -221,14 +222,9 @@ except Exception as e:
 # =========================================
 # SSS-Aware Loss: 同时兼顾暗部精度和亮部通透感
 # =========================================
-# 通道权重: 补偿 base_color 除法造成的梯度不均衡
-# base_color = [0.28, 0.58, 0.22] → 除法后 G 通道值最小、梯度最大
-# 为了均衡，给值被放大更多的通道(R,B)更高权重，抵消 log 空间的梯度衰减
-_base_color_t = torch.tensor([0.28, 0.58, 0.22], device='cuda', dtype=torch.float32)
-_inv_base = 1.0 / _base_color_t  # [3.57, 1.72, 4.55] — 放大倍率
-sss_channel_weight = _inv_base / _inv_base.sum() * 3.0  # 归一化后 × 3 保持总权重不变
-# 结果 ≈ [1.09, 0.53, 1.38] — B 最高、G 最低，正好补偿 base_color 除法的不均衡
-print(f"通道均衡权重: R={sss_channel_weight[0]:.3f}, G={sss_channel_weight[1]:.3f}, B={sss_channel_weight[2]:.3f}")
+# 均衡通道权重: 线性空间解耦后各通道梯度已自然均衡
+sss_channel_weight = torch.tensor([1.0, 1.0, 1.0], device='cuda', dtype=torch.float32)
+print(f"通道权重: R={sss_channel_weight[0]:.3f}, G={sss_channel_weight[1]:.3f}, B={sss_channel_weight[2]:.3f}")
 
 def sss_aware_loss(pred, target):
     # 使用 Log-Space (对数空间) 进行监督，解决直接受光面压制暗部 SSS 细节的问题。
@@ -305,7 +301,7 @@ def export_model_json(model, path):
     })
     
     out_data["y_scale"] = [1.0, 1.0, 1.0]
-    out_data["base_color"] = base_color.tolist()
+    out_data["base_color"] = base_color_srgb.tolist()  # sRGB for UI
     with open(path, "w") as f:
         json.dump(out_data, f)
 
@@ -313,7 +309,7 @@ def export_model_json(model, path):
 # 3. 训练
 # =========================================
 model = NeuralSSS().cuda()
-epochs = 50
+epochs = 200
 optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4, weight_decay=1e-4)
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
     optimizer, T_max=epochs, eta_min=1e-6
@@ -392,7 +388,7 @@ save_file(state_dict, f"{data_dir}/jade_sss_weights.safetensors")
 print(f"导出完成: {data_dir}/jade_sss_weights.safetensors")
 # 2. 导出完毕
 print(f"  → y_scale (ToneMapped) = [1.0, 1.0, 1.0]")
-print(f"  → base_color = {base_color.tolist()}")
+print(f"  → base_color (sRGB) = {base_color_srgb.tolist()}, (linear) = {[f'{v:.4f}' for v in base_color]}")
 # =========================================
 # 5. 快速质量检查
 # =========================================

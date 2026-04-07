@@ -170,7 +170,8 @@ def render_live_preview(test_idx=0):
     print(f"共提取 {len(batch_features)} 个像素, 准备进入轮询循环...")
     X_tensor = torch.tensor(batch_features, dtype=torch.float32).cuda()
     
-    base_color = np.array([0.28, 0.58, 0.22], dtype=np.float32)
+    base_color_srgb = np.array([0.28, 0.58, 0.22], dtype=np.float32)
+    base_color = np.power(base_color_srgb, 2.2).astype(np.float32)  # Linear, matching train & shader
 
     # 加载 sun_energy: MLP 输出是单位光强 transmittance，需要乘回 energy 才能和 GT 对比
     sun_energy_file = os.path.join(data_dir, 'sun_energy.npy')
@@ -218,8 +219,16 @@ def render_live_preview(test_idx=0):
                             preds_hdr = torch.cat(preds, dim=0).cpu().numpy()
                         
                         preds_hdr = np.maximum(preds_hdr, 0.0)
-                        # MLP 输出是单位光强 transmittance，乘回 sun_energy + base_color 以匹配 GT
+                        # MLP 输出是单位光强 transmittance，乘回 linear base_color + sun_energy
                         preds_rgb = preds_hdr * base_color * sun_energy
+                        
+                        # Hue-preserving Reinhard soft-knee (matching shader)
+                        knee, shoulder = 1.5, 0.3
+                        peak = np.max(preds_rgb, axis=-1, keepdims=True)
+                        excess = np.maximum(peak - knee, 0.0)
+                        compressed = knee + excess / (1.0 + excess * shoulder)
+                        scale = np.where(peak > knee, compressed / np.maximum(peak, 1e-8), 1.0)
+                        preds_rgb = preds_rgb * scale
                         
                         for i, (py, px) in enumerate(batch_pixels):
                             img_pred[py, px] = preds_rgb[i]

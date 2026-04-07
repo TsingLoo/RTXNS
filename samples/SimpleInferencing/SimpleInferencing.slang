@@ -443,27 +443,28 @@ void main_ps(
         UnifiedMLP(NdotL, NdotV, NdotH, VdotL, roughness, metallic, specular,
             thickness, ao, curvature, mlpResults);
         
-        // MLP output = unit-intensity complete shading response (SSS + specular baked in).
-        float3 hdrShading = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
+        // MLP output = unit-intensity color-independent light transport.
+        float3 hdrTransport = max(float3(mlpResults[0], mlpResults[1], mlpResults[2]), 0.0f);
+        
+        // Linearize base color (sRGB -> linear) for physically correct composition.
+        // Training divides linear HDR by linear base_color, so inference multiplies back in linear.
+        float3 Cdlin_sss = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
+        
+        // Compose: transport * linear base color * light intensity
+        float3 neuralDirectional = hdrTransport * Cdlin_sss * gConst.lightIntensity.rgb;
         
         // Hue-preserving highlight compression (Reinhard soft-knee on max channel).
-        // Problem: When transmittance is high (lit side), after base_color * lightIntensity
-        // multiplication, all RGB channels are large → ACES maps them all to ~1.0 → white/rubber.
-        // Fix: Compress only the intensity while keeping channel ratios (hue) identical.
-        // Values below 'knee' (e.g. backlit SSS) pass through completely unchanged.
+        // Applied AFTER composition to compress actual HDR brightness while preserving hue.
         {
-            const float knee = 1.5;       // Only compress peaks above this
-            const float shoulder = 0.3;    // Compression strength (higher = more compression)
-            float peak = max(max(hdrShading.r, hdrShading.g), hdrShading.b);
+            const float knee = 1.5;
+            const float shoulder = 0.3;
+            float peak = max(max(neuralDirectional.r, neuralDirectional.g), neuralDirectional.b);
             if (peak > knee) {
                 float excess = peak - knee;
                 float compressed = knee + excess / (1.0 + excess * shoulder);
-                hdrShading *= compressed / peak;
+                neuralDirectional *= compressed / peak;
             }
         }
-        
-        // Multiply by base color and light intensity to get final directional contribution.
-        float3 neuralDirectional = hdrShading * baseColor.rgb * gConst.lightIntensity.rgb;
         
         float3 finalColor = neuralDirectional;
         
@@ -473,8 +474,7 @@ void main_ps(
         // IBL Diffuse: ambient lighting from environment irradiance
         float3 fresnelRoughness_n = F0 + (max(float3(1.0 - roughness), F0) - F0) * pow(1.0 - NdotV, 5.0);
         float3 kD_n = (1.0 - fresnelRoughness_n) * (1.0 - metallic);
-        float3 Cdlin_n = float3(pow(max(0.0, baseColor.r), 2.2), pow(max(0.0, baseColor.g), 2.2), pow(max(0.0, baseColor.b), 2.2));
-        finalColor += kD_n * Cdlin_n * iblDiffuse * ao;
+        finalColor += kD_n * Cdlin_sss * iblDiffuse * ao;
         
         // IBL Specular: environment reflections using the BRDF LUT
         float2 envBRDF_n = t_BRDFLut.SampleLevel(s_Skybox, clamp(float2(NdotV, roughness), 0.01, 0.99), 0).rg;

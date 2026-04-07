@@ -93,7 +93,7 @@ for light_idx, ld in enumerate(light_dirs):
     for mat_var in range(n_material_variants):
         # 随机材质参数
         r_roughness = random.uniform(0.1, 0.9)
-        r_metallic = random.uniform(0.0, 0.8)
+        r_metallic = random.uniform(0.0, 0.05)
         r_specular = random.uniform(0.3, 0.7)
 
         # 应用到 Blender BSDF

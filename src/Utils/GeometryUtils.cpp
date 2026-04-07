@@ -535,7 +535,7 @@ bool LoadGLTF(
                 mat_idx = (uint32_t)(prim->material - data->materials);
             }
             
-            uint32_t vertexOffset = (uint32_t)outVertices.size();
+            uint32_t vertexOffset = (uint32_t)outVertices.size(); 
             
             cgltf_accessor* pos_acc = nullptr;
             cgltf_accessor* norm_acc = nullptr;
